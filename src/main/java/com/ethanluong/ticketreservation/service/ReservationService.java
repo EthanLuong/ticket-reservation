@@ -21,4 +21,14 @@ public interface ReservationService {
     Reservation cancel(UUID userId, UUID reservationId);
 
     List<Reservation> myReservations(UUID userId);
+
+    /**
+     * Releases any reservations whose TTL hold has lapsed: flips
+     * reservation.status HELD → EXPIRED and the backing seat HELD → AVAILABLE
+     * atomically per reservation. Safe to call on a scheduler — idempotent
+     * by construction (only picks up HELD rows past their expiresAt).
+     *
+     * @return the number of reservations that were expired in this sweep
+     */
+    int sweepExpired();
 }

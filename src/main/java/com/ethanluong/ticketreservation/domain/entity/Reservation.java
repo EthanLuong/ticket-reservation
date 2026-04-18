@@ -43,4 +43,9 @@ public class Reservation {
 
     @Column(name = "updated_at", nullable = false, insertable = false)
     private OffsetDateTime updatedAt;
+
+    @PreUpdate
+    void touchUpdatedAt() {
+        this.updatedAt = OffsetDateTime.now();
+    }
 }

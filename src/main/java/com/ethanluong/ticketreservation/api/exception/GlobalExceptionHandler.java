@@ -2,6 +2,7 @@ package com.ethanluong.ticketreservation.api.exception;
 
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -16,8 +17,7 @@ import java.time.OffsetDateTime;
 import java.util.stream.Collectors;
 
 /**
- * RFC 7807 (ProblemDetail) responses for all exception paths. Types are URIs
- * the client can key off of — stable contract instead of message-string parsing.
+ * RFC 7807 (ProblemDetail) responses for all exception paths.
  */
 @RestControllerAdvice
 @Slf4j
@@ -85,6 +85,15 @@ public class GlobalExceptionHandler {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.FORBIDDEN, "Access denied");
         pd.setType(URI.create(TYPE_BASE + "access-denied"));
         pd.setTitle("Forbidden");
+        return pd;
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ProblemDetail onDataIntegrityViolation(DataIntegrityViolationException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,
+                "This seat is no longer available.");
+        pd.setType(URI.create(TYPE_BASE + "seat-already-reserved"));
+        pd.setTitle("Seat already reserved");
         return pd;
     }
 
