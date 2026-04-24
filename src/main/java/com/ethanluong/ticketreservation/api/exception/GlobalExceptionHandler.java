@@ -35,6 +35,17 @@ public class GlobalExceptionHandler {
         return pd;
     }
 
+    @ExceptionHandler(SeatContentionException.class)
+    public ProblemDetail onSeatContention(SeatContentionException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create(TYPE_BASE + "seat-contention"));
+        pd.setTitle("Seat temporarily contested");
+        pd.setProperty("seatId", ex.getSeatId());
+        pd.setProperty("retryable", true);
+        pd.setProperty("timestamp", OffsetDateTime.now());
+        return pd;
+    }
+
     @ExceptionHandler(OptimisticLockingFailureException.class)
     public ProblemDetail onOptimisticLock(OptimisticLockingFailureException ex) {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,

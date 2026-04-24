@@ -9,6 +9,7 @@ import com.ethanluong.ticketreservation.domain.repository.EventRepository;
 import com.ethanluong.ticketreservation.domain.repository.ReservationRepository;
 import com.ethanluong.ticketreservation.domain.repository.SeatRepository;
 import com.ethanluong.ticketreservation.domain.repository.UserRepository;
+import com.ethanluong.ticketreservation.domain.type.ReservationStatus;
 import com.ethanluong.ticketreservation.domain.type.SeatStatus;
 import com.ethanluong.ticketreservation.service.ReservationService;
 import org.junit.jupiter.api.AfterEach;
@@ -141,5 +142,41 @@ class RedisTTLHoldIT {
         assertThat(second.getId()).isNotEqualTo(first.getId());
         assertThat(redis.opsForValue().get(holdKey(seatId)))
                 .isEqualTo(second.getId().toString());
+    }
+
+    @Test
+    @DisplayName("reserve() reconciles stale HELD row when Redis TTL has expired")
+    void reserve_reconcilesStaleHeldRowOnExpiredTtl() {
+        // Simulate an expired hold: DB still says HELD but the Redis TTL has lapsed.
+        Reservation stale = reservationService.reserve(userId, seatId);
+        redis.delete(holdKey(seatId)); // simulate TTL expiry
+
+        // Another user tries to reserve — without reconciliation this would 409
+        // (seat.status=HELD in Postgres). With reconciliation, the stale row is
+        // flipped to EXPIRED and the new reservation wins.
+        Reservation fresh = reservationService.reserve(otherUserId, seatId);
+
+        assertThat(fresh.getId()).isNotEqualTo(stale.getId());
+        var reloadedStale = reservationRepository.findById(stale.getId()).orElseThrow();
+        assertThat(reloadedStale.getStatus()).isEqualTo(ReservationStatus.EXPIRED);
+
+        var seat = seatRepository.findById(seatId).orElseThrow();
+        assertThat(seat.getStatus()).isEqualTo(SeatStatus.HELD); // the new hold's state
+    }
+
+    @Test
+    @DisplayName("myReservations() lazy-reconciles HELD rows whose Redis TTL has expired")
+    void myReservations_lazilyReconcilesExpiredHolds() {
+        Reservation r = reservationService.reserve(userId, seatId);
+        redis.delete(holdKey(seatId)); // simulate TTL expiry
+
+        var list = reservationService.myReservations(userId);
+
+        assertThat(list).hasSize(1);
+        assertThat(list.get(0).getStatus()).isEqualTo(ReservationStatus.EXPIRED);
+
+        // Seat is freed so a new reservation can take it.
+        var seat = seatRepository.findById(seatId).orElseThrow();
+        assertThat(seat.getStatus()).isEqualTo(SeatStatus.AVAILABLE);
     }
 }

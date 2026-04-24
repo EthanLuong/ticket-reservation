@@ -35,25 +35,34 @@ public class ReservationServiceImpl implements ReservationService {
 
     @Override
     public Reservation reserve(UUID userId, UUID seatId) {
-        // Pre-generate the reservation id so it can be written to Redis
-        // before the DB row exists. Hibernate's UUID strategy honors a
-        // pre-set id (only generates when null).
+        return holdStore.withSeatLock(seatId, () -> doReserve(userId, seatId));
+    }
+
+    private Reservation doReserve(UUID userId, UUID seatId) {
         UUID reservationId = UUID.randomUUID();
         Duration ttl = Duration.ofMinutes(reservationExpiryMinutes);
 
-        // Redis-first: SET NX EX is an atomic collision check. Only the
-        // first caller for this seat wins; the rest return false and fail fast.
+        // Redis-first: SET NX EX gives atomic collision detection under the lock.
         if (!holdStore.tryHold(seatId, reservationId, ttl)) {
             throw new SeatNotAvailableException(seatId);
         }
 
-        // @Transactional does not cover Redis. Drive the DB boundary
-        // programmatically so a failed transaction can compensate the
-        // Redis write explicitly in the catch block.
         try {
             return tx.execute(status -> {
                 var seat = seatRepository.findById(seatId).orElseThrow();
-                if (seat.getStatus() != SeatStatus.AVAILABLE) {
+
+                // With both the Redisson lock AND a fresh Redis TTL hold, any
+                // HELD row in Postgres for this seat is definitionally stale —
+                // the previous hold's Redis TTL has already expired. Reconcile
+                // on the spot so the seat becomes reservable without waiting
+                // for myReservations() to be called by the prior holder.
+                if (seat.getStatus() == SeatStatus.HELD) {
+                    reservationRepository
+                            .findAllByStatusAndSeat_Id(ReservationStatus.HELD, seatId)
+                            .forEach(r -> r.setStatus(ReservationStatus.EXPIRED));
+                } else if (seat.getStatus() != SeatStatus.AVAILABLE) {
+                    // SOLD (or any future non-AVAILABLE terminal state) is not
+                    // reconcilable — truly unavailable.
                     throw new SeatNotAvailableException(seatId);
                 }
 
@@ -68,12 +77,12 @@ public class ReservationServiceImpl implements ReservationService {
                         .expiresAt(OffsetDateTime.now().plusMinutes(reservationExpiryMinutes))
                         .build();
 
-                // save() works with a pre-set id because Reservation implements
-                // Persistable — its isNew() returns true until the @PostPersist
-                // callback flips the flag, so Spring Data routes to persist, not merge.
                 return reservationRepository.save(newReservation);
             });
         } catch (RuntimeException e) {
+            // @Transactional rolled back the DB, but Redis has no rollback.
+            // Compensate explicitly so the hold key doesn't block the seat
+            // for up to 10 min.
             holdStore.release(seatId);
             throw e;
         }
@@ -81,6 +90,15 @@ public class ReservationServiceImpl implements ReservationService {
 
     @Override
     public Reservation cancel(UUID userId, UUID reservationId) {
+        // Re-fetch seatId outside the lock so we can key the lock on it.
+        UUID seatId = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new ResourceNotFoundException("Reservation", reservationId))
+                .getSeat().getId();
+
+        return holdStore.withSeatLock(seatId, () -> doCancel(reservationId));
+    }
+
+    private Reservation doCancel(UUID reservationId) {
         Reservation cancelled = tx.execute(status -> {
             var reservation = reservationRepository.findById(reservationId).orElseThrow();
             var seat = reservation.getSeat();
@@ -92,33 +110,42 @@ public class ReservationServiceImpl implements ReservationService {
             return reservationRepository.save(reservation);
         });
 
-        // Release only after the DB commit succeeds. If the tx rolled back,
-        // the key stays and self-heals at TTL; a premature release would
-        // free the seat for someone else before the cancel is durable.
         holdStore.release(cancelled.getSeat().getId());
         return cancelled;
     }
 
     @Override
-    @Transactional(readOnly = true)
     public List<Reservation> myReservations(UUID userId) {
         if (!userRepository.existsById(userId)) {
             throw new ResourceNotFoundException("User", userId);
         }
-        return reservationRepository.findAllByUser_IdOrderByCreatedAtDesc(userId);
-    }
 
-    @Override
-    @Transactional
-    public int sweepExpired() {
-        var expired = reservationRepository.findAllByStatusAndExpiresAtBefore(
-                ReservationStatus.HELD, OffsetDateTime.now());
+        List<Reservation> reservations = tx.execute(status ->
+                reservationRepository.findAllByUser_IdOrderByCreatedAtDesc(userId));
 
-        for (var reservation : expired) {
-            reservation.setStatus(ReservationStatus.EXPIRED);
-            reservation.getSeat().setStatus(SeatStatus.AVAILABLE);
+        // Lazy reconciliation: a HELD row whose Redis TTL hold has expired is
+        // stale. Flip to EXPIRED on read, free its seat. Self-healing without
+        // a sweeper process.
+        List<Reservation> stale = reservations.stream()
+                .filter(r -> r.getStatus() == ReservationStatus.HELD)
+                .filter(r -> !holdStore.hasHold(r.getSeat().getId()))
+                .toList();
+
+        if (!stale.isEmpty()) {
+            tx.executeWithoutResult(status -> {
+                for (Reservation r : stale) {
+                    var managed = reservationRepository.findById(r.getId()).orElseThrow();
+                    var seat = managed.getSeat();
+                    managed.setStatus(ReservationStatus.EXPIRED);
+                    if (seat.getStatus() == SeatStatus.HELD) {
+                        seat.setStatus(SeatStatus.AVAILABLE);
+                    }
+                }
+            });
+            // Reflect the flip in the returned list so callers see consistent state.
+            stale.forEach(r -> r.setStatus(ReservationStatus.EXPIRED));
         }
 
-        return expired.size();
+        return reservations;
     }
 }
