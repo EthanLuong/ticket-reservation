@@ -15,6 +15,16 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   app:
     build: .
     ports:
@@ -23,9 +33,12 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/ticketreservation
       SPRING_DATASOURCE_USERNAME: postgres
       SPRING_DATASOURCE_PASSWORD: password
+      SPRING_DATA_REDIS_URL: redis://redis:6379
       APP_SECURITY_JWT_SECRET: ${APP_SECURITY_JWT_SECRET:-dev-only-secret-change-me-0123456789abcdef0123456789abcdef}
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:
