@@ -88,6 +88,7 @@ class ReservationSweeperIT {
                 .build());
 
         return reservationRepository.save(Reservation.builder()
+                .id(UUID.randomUUID())
                 .user(userRepository.findById(userId).orElseThrow())
                 .seat(seat)
                 .status(ReservationStatus.HELD)
