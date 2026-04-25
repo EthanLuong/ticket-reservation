@@ -1,6 +1,6 @@
 # Event Ticket Reservation System
 
-A Spring Boot event ticketing service handling concurrent seat reservations with a three-layer correctness defense: app-layer fast-fail, JPA optimistic locking via `@Version`, and a DB-level partial unique index as a backstop. Built as an interview portfolio piece.
+A Spring Boot event ticketing service handling concurrent seat reservations with cross-JVM coordination: Redis-native TTL holds, a Redisson distributed lock for hot-event contention, and a Postgres `@Version` + partial unique index backstop. Built as an interview portfolio piece.
 
 **Live demo:** [https://ticket-reservation-production-7193.up.railway.app](https://ticket-reservation-production-7193.up.railway.app)
 **Repo:** [github.com/EthanLuong/ticket-reservation](https://github.com/EthanLuong/ticket-reservation)
@@ -9,7 +9,9 @@ A Spring Boot event ticketing service handling concurrent seat reservations with
 
 ## Status
 
-**Phase 0 (reservation foundation) — SHIPPED.** Single-service reservation system with JWT auth, optimistic-locked seat holds, TTL expiry, and Testcontainers-proven race invariants. Deployed on Railway with managed Postgres.
+**Phase 1 (Redis holds + distributed lock) — SHIPPED.** Reservation TTL is now Redis-native (atomic `SET NX EX`), critical sections are wrapped in a Redisson `RLock` for cross-JVM serialization, and the `@Scheduled` Postgres sweeper has been retired in favor of two-path lazy reconciliation. Failure-closed (503) on Redis outage — see [`docs/adr/0002-redis-for-holds-and-locks.md`](docs/adr/0002-redis-for-holds-and-locks.md) for the design decisions.
+
+**Phase 0 (reservation foundation) — SHIPPED.** Single-service reservation system with JWT auth, optimistic-locked seat holds, and Testcontainers-proven race invariants. Deployed on Railway with managed Postgres.
 
 Phased roadmap (Phase 1–5) below.
 
@@ -23,12 +25,14 @@ Phased roadmap (Phase 1–5) below.
 docker compose up --build
 ```
 
-Spins up Postgres 17-alpine + the service, gated on a Postgres healthcheck. App listens on `http://localhost:8080`. Health probe:
+Spins up Postgres 17-alpine + Redis 7-alpine + the service, gated on healthchecks for both. App listens on `http://localhost:8080`. Health probe:
 
 ```bash
 curl http://localhost:8080/actuator/health
-# {"status":"UP"}
+# {"status":"UP"}    # 200 when Postgres + Redis are both up
 ```
+
+If Redis is unreachable, reservation endpoints return 503 with a retryable `ProblemDetail`; reads (events, seats) continue to work since they don't touch Redis.
 
 ### Option B — Maven dev loop (fastest)
 
@@ -45,7 +49,7 @@ The `test-run` goal auto-wires a disposable Postgres container via `@ServiceConn
 
 ## Architecture
 
-Single service, single database. Phase 0 intentionally avoids service splitting — concurrency correctness is the interesting problem at this stage; distributed coordination comes in Phase 1+.
+Single service, two backing stores (Postgres for system of record, Redis for ephemeral coordination). Phase 1 introduces Redis specifically for cross-JVM coordination — Phase 0's `@Version` + partial unique index remain as the DB-level correctness backstop.
 
 ```
                     ┌────────────────────────────┐
@@ -56,31 +60,37 @@ Single service, single database. Phase 0 intentionally avoids service splitting 
      ┌─────────────────────────────────────────────────────────┐
      │                   Spring Boot App                       │
      │                                                         │
-     │  ┌──────────────┐   ┌──────────────┐   ┌────────────┐   │
-     │  │  Controllers │──▶│   Services   │──▶│  Repos     │   │
-     │  │  (REST)      │   │  (@Trans-    │   │  (JPA)     │   │
-     │  │              │   │   actional)  │   │            │   │
-     │  └──────────────┘   └──────┬───────┘   └─────┬──────┘   │
-     │                            │                 │          │
-     │  ┌──────────────────┐      │                 │          │
-     │  │  Security Filter │      │                 │          │
-     │  │  Chain (JWT)     │      │                 │          │
-     │  └──────────────────┘      │                 │          │
-     │                            │                 │          │
-     │  ┌──────────────────┐      │                 │          │
-     │  │  @Scheduled TTL  │──────┘                 │          │
-     │  │  Sweeper (5s)    │                        │          │
-     │  └──────────────────┘                        │          │
-     └──────────────────────────────────────────────┼──────────┘
-                                                    │
-                                                    ▼
-                           ┌──────────────────────────────┐
-                           │   PostgreSQL 17              │
-                           │   - Flyway migrations        │
-                           │   - Partial unique index     │
-                           │     backstop                 │
-                           │   - @Version optimistic col  │
-                           └──────────────────────────────┘
+     │  ┌──────────────┐   ┌────────────────┐  ┌────────────┐  │
+     │  │  Controllers │──▶│   Services     │─▶│  Repos     │──┼──▶ Postgres
+     │  │  (REST)      │   │  (Tx Template) │  │  (JPA)     │  │
+     │  └──────────────┘   └────────┬───────┘  └────────────┘  │
+     │                              │                          │
+     │  ┌──────────────────┐        │                          │
+     │  │  Security Filter │        │                          │
+     │  │  Chain (JWT)     │        │                          │
+     │  └──────────────────┘        ▼                          │
+     │                     ┌──────────────────┐                │
+     │                     │ ReservationHold- │                │
+     │                     │ Store            │────────────────┼──▶ Redis
+     │                     │  - SET NX EX     │   Lettuce      │
+     │                     │    (TTL hold)    │   (Spring Data)│
+     │                     │  - Redisson      │                │
+     │                     │    RLock         │   Redisson     │
+     │                     │    (crit. sec.)  │                │
+     │                     │  - hasHold (read)│                │
+     │                     └──────────────────┘                │
+     └─────────────────────────────────────────────────────────┘
+                  │                              │
+                  ▼                              ▼
+   ┌──────────────────────────────┐   ┌──────────────────────────────┐
+   │   PostgreSQL 17              │   │   Redis 7                    │
+   │   - Flyway migrations        │   │   - hold:seat:{id} (TTL key) │
+   │   - Partial unique index     │   │   - lock:seat:{id} (RLock)   │
+   │     backstop                 │   │   - Upstash in prod          │
+   │   - @Version optimistic col  │   │                              │
+   │   - System of record         │   │   Coordination only —        │
+   │                              │   │   no durable user state      │
+   └──────────────────────────────┘   └──────────────────────────────┘
 ```
 
 ### Domain
@@ -91,6 +101,29 @@ Event  1───N  Seat  1───N  Reservation  N───1  User
 ```
 
 Full schema: [`src/main/resources/db/migration/V1__init.sql`](src/main/resources/db/migration/V1__init.sql).
+
+### Reservation flow (Phase 1)
+
+```
+reserve(userId, seatId)
+  ├─ withSeatLock(seatId) — Redisson tryLock(100ms wait, 2s lease)
+  │      └─ contention → SeatContentionException → 409 (retryable=true)
+  │
+  ├─ tryHold(seatId, reservationId, 10min) — SET NX EX hold:seat:{id}
+  │      └─ collision → SeatNotAvailableException → 409
+  │
+  ├─ TransactionTemplate.execute:
+  │      ├─ load seat from Postgres
+  │      ├─ if seat.status == HELD → reconcile stale rows to EXPIRED, continue
+  │      ├─ flip seat.status = HELD, save (saveAndFlush — @Version checked)
+  │      └─ insert reservation row (id pre-assigned by service)
+  │
+  └─ on tx exception → holdStore.release(seatId)  (compensating DEL)
+```
+
+Cancellation mirrors the structure: lock → tx (set CANCELLED, free seat) → DEL Redis hold key after commit.
+
+`myReservations()` lazily reconciles HELD-with-no-Redis-key rows to EXPIRED on read — replaces the retired `@Scheduled` sweeper.
 
 ---
 
@@ -155,14 +188,37 @@ curl -X POST $BASE/api/reservations \
   -d "{\"seatId\":\"$SEAT_ID\"}"
 ```
 
-Error responses follow [RFC 7807](https://www.rfc-editor.org/rfc/rfc7807) (`application/problem+json`). Example for a double-book attempt:
+Error responses follow [RFC 7807](https://www.rfc-editor.org/rfc/rfc7807) (`application/problem+json`). Headline cases:
+
+| Status | `type` slug | When | Client action |
+|---|---|---|---|
+| `409` | `seat-not-available` | Seat is currently held by another user | Pick another seat |
+| `409` | `seat-contention` | Another reserve/cancel for this seat is in flight (Redisson lock contention) | **Auto-retry** — `retryable: true` flag set |
+| `409` | `optimistic-lock` | DB-level `@Version` race lost (rare under Phase 1's lock + TTL) | Refresh state, retry |
+| `503` | `redis-unavailable` | Redis is unreachable — coordination layer is down | Retry after `retryAfterSeconds` (5s) |
+
+Example for the double-book attempt:
 
 ```json
 {
-  "type": "https://ticket-reservation.example/errors/optimistic-lock",
-  "title": "Concurrent modification",
+  "type": "https://ticket-reservation.example/errors/seat-not-available",
+  "title": "Seat not available",
   "status": 409,
-  "detail": "Another request modified this seat first. Retry with fresh state."
+  "detail": "Seat 9c8f... is not available",
+  "seatId": "9c8f..."
+}
+```
+
+Example for Redis outage:
+
+```json
+{
+  "type": "https://ticket-reservation.example/errors/redis-unavailable",
+  "title": "Service temporarily unavailable",
+  "status": 503,
+  "detail": "Reservation service is temporarily unavailable. Please retry shortly.",
+  "retryable": true,
+  "retryAfterSeconds": 5
 }
 ```
 
@@ -216,6 +272,30 @@ Two common ways to keep `updated_at` fresh on every update: DB trigger or JPA li
 - Makes schema changes auditable (one migration file per change, version-controlled).
 - Validated in CI: startup itself is the smoke test.
 
+### 6. Phase 1 — Redis for coordination, Postgres for system of record
+
+Full rationale in [`docs/adr/0002-redis-for-holds-and-locks.md`](docs/adr/0002-redis-for-holds-and-locks.md). Headline decisions:
+
+- **Two-layer Redis**: `SET NX EX` for the TTL hold (atomic, 10 min business duration) and Redisson `RLock` for the critical-section lock (2 s lease, prevents wasted work on hot events). Both are needed — the SET NX gives correctness, the RLock gives efficiency.
+- **Drop the `@Scheduled` sweeper**: Redis-native TTL replaces it. Stale rows are reconciled on-the-fly inside `reserve()` (under the RLock) and lazily inside `myReservations()` (on user read). Self-healing without a polling thread.
+- **Per-seat lock granularity**: `lock:seat:{id}`, not per-event. Two reservations for two different seats in the same event don't serialize.
+- **Fail-closed on Redis outage** (503 SERVICE_UNAVAILABLE): a fall-back-to-DB-only path would lose cross-JVM serialization and permit double-holds. Better to refuse service. Verified by `RedisOutageIT`.
+- **Single-node Redis** (Upstash managed) for Phase 1; Redlock multi-node hardening deferred to Phase 4+ if real load measurements justify it.
+
+### 7. `Persistable<UUID>` + drop `@GeneratedValue` for pre-assigned reservation ids
+
+Phase 1's "Redis-first ordering" needs the reservation id **before** the DB insert (so the id can be the Redis value at `SET NX EX` time). Pre-assigning a UUID to a Hibernate entity with `@GeneratedValue(strategy = UUID)` triggered both Spring Data's "is this new?" heuristic AND Hibernate's transient-vs-detached classifier — two independent layers that needed to agree. The fix:
+
+```java
+@Id
+@Column(columnDefinition = "uuid", updatable = false, nullable = false)
+private UUID id;          // no @GeneratedValue
+
+// + implements Persistable<UUID> with @Transient boolean isNew flag
+```
+
+Drops `@GeneratedValue` (so Hibernate doesn't classify pre-set ids as detached) and implements `Persistable` (so Spring Data routes to `persist()`, not `merge()`). Four rounds of failure (StaleObjectStateException → PersistentObjectException → still PersistentObjectException with Persistable alone → finally INSERT works once `@GeneratedValue` is dropped) before the right combination clicked — interview-grade JPA gotcha story.
+
 ---
 
 ## Testing
@@ -231,21 +311,22 @@ Two common ways to keep `updated_at` fresh on every update: DB trigger or JPA li
 
 Categorized outcomes distinguish app-layer losses (`FAILURE_NOT_AVAILABLE`) from DB-layer losses (`FAILURE_OPTIMISTIC_LOCK`, `FAILURE_DATA_INTEGRITY`), proving which layer caught each racing thread. Ran 50× clean — invariant is stable, not flaky.
 
-### TTL expiry — the scheduler test
+### Phase 1 Redis tests
 
-[`ReservationSweeperIT`](src/test/java/com/ethanluong/ticketreservation/ReservationSweeperIT.java) covers:
-- Expired `HELD` → `EXPIRED`, seat flips back to `AVAILABLE`
-- Future `HELD` untouched
-- `CONFIRMED` never swept
-- Mixed batch — only the expired ones move
+| Test class | What it verifies |
+|---|---|
+| [`RedisTTLHoldIT`](src/test/java/com/ethanluong/ticketreservation/RedisTTLHoldIT.java) | `reserve()` writes `hold:seat:{id}` with TTL ≈ 600s; collision blocks second reserve; `cancel()` releases the key; on-the-fly + lazy reconciliation paths |
+| [`RedissonLockContentionIT`](src/test/java/com/ethanluong/ticketreservation/RedissonLockContentionIT.java) | `reserve()` fast-fails with `SeatContentionException` (<500ms) when the `RLock` is held on a different thread; succeeds normally once released |
+| [`RedisOutageIT`](src/test/java/com/ethanluong/ticketreservation/RedisOutageIT.java) | `@MockitoBean RedissonClient` injects connection failure; asserts exception bubbles to handler, zero DB drift, 503 ProblemDetail mapping |
 
 ### Stack
 
 - JUnit 5 + AssertJ
-- Testcontainers with `@ServiceConnection` (real Postgres 17-alpine per test class)
+- Testcontainers with `@ServiceConnection` for both Postgres 17-alpine and Redis 7-alpine
+- `@MockitoBean` (Spring Framework 6.2+) for failure injection
 - No H2, no mocks for DB-backed behavior — Testcontainers because H2's partial index and `gen_random_uuid()` don't match Postgres semantics
 
-Run the full suite:
+Run the full suite (17 tests across 6 classes):
 
 ```bash
 ./mvnw verify
@@ -257,10 +338,11 @@ Run the full suite:
 
 - **Runtime:** Java 21, Spring Boot 4.0.x
 - **Data:** PostgreSQL 17-alpine, Flyway migrations, Spring Data JPA (Hibernate)
+- **Coordination:** Redis 7-alpine, Spring Data Redis (Lettuce) for TTL holds, Redisson 3.50.0 for distributed locks
 - **Security:** Spring Security 6, jjwt 0.12.x
-- **Testing:** JUnit 5, AssertJ, Testcontainers
+- **Testing:** JUnit 5, AssertJ, Testcontainers, `@MockitoBean` for failure injection
 - **Packaging:** Multi-stage Dockerfile (Java 21 JDK builder → JRE-alpine runtime)
-- **Deploy:** Railway (managed Postgres + container)
+- **Deploy:** Railway (managed Postgres + container) + Upstash (managed Redis)
 - **Build:** Maven (via `mvnw`)
 
 ---
@@ -270,7 +352,7 @@ Run the full suite:
 | Phase | Scope | Status |
 |---|---|---|
 | **0. Reservation foundation** | Entities, JWT auth, `@Version` optimistic lock, TTL sweeper, Testcontainers race proof, Railway deploy | ✅ Shipped |
-| **1. Redis holds + distributed lock** | Swap DB TTL for Redis-native TTL; Redisson lock for hot events | Planned |
+| **1. Redis holds + distributed lock** | Redis-native TTL holds, Redisson `RLock` per seat, sweeper retired, lazy reconciliation, fail-closed (503) on Redis outage | ✅ Shipped |
 | **2. Payment + saga** | Extract payment service; Kafka between services; outbox; saga orchestration with timeout compensation | Planned |
 | **3. Frontend** | Next.js 14 browse + seat-map booking flow | Planned |
 | **4. Scale signals** | Rate limiting (Bucket4j), Resilience4j circuit breakers, Grafana dashboards, hot-event caching | Planned |
@@ -289,7 +371,16 @@ Required at runtime:
 | `SPRING_DATASOURCE_URL` | JDBC URL — must start with `jdbc:postgresql://` |
 | `SPRING_DATASOURCE_USERNAME` | DB user |
 | `SPRING_DATASOURCE_PASSWORD` | DB password |
+| `SPRING_DATA_REDIS_URL` | Redis connection — `redis://host:port` for plaintext, `rediss://host:port` for TLS (Upstash). Defaults to `redis://localhost:6379` for local dev. |
 | `APP_SECURITY_JWT_SECRET` | HS256 signing key, ≥32 bytes |
 | `SERVER_PORT` | On Railway/Fly, bind to `${PORT}` |
 
 Local dev via `docker compose up` supplies all of these with sane defaults. A dev JWT secret is baked into `application.properties` — **never use it in production**.
+
+### Upstash Redis setup (production)
+
+1. Create a free-tier Redis database at [upstash.com](https://upstash.com).
+2. Copy the connection URL — it begins with `rediss://` (note the second `s` for TLS).
+3. Set on Railway: `SPRING_DATA_REDIS_URL=rediss://<host>:<port>` with the password embedded in the URL (`rediss://default:<password>@<host>:<port>`).
+4. Verify in `/actuator/health` — Redis component should report `UP`.
+5. Smoke test: POST a reservation, wait > 10 minutes, GET `/api/reservations/me` — the row should now be `EXPIRED` and the seat re-reservable. Validates Redis-native TTL + lazy reconciliation in production.

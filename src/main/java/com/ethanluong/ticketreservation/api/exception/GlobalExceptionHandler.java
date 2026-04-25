@@ -2,8 +2,10 @@ package com.ethanluong.ticketreservation.api.exception;
 
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.client.RedisException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.security.access.AccessDeniedException;
@@ -105,6 +107,26 @@ public class GlobalExceptionHandler {
                 "This seat is no longer available.");
         pd.setType(URI.create(TYPE_BASE + "seat-already-reserved"));
         pd.setTitle("Seat already reserved");
+        return pd;
+    }
+
+    /**
+     * Redis is the source of truth for the TTL hold AND hosts the Redisson
+     * critical-section lock. With both unavailable, we cannot guarantee the
+     * cross-JVM serialization that prevents double-holds — fail fast with 503
+     * rather than silently fall back to a DB-only path that would violate the
+     * invariant. See ADR 0002 for the decision rationale.
+     */
+    @ExceptionHandler({RedisConnectionFailureException.class, RedisException.class})
+    public ProblemDetail onRedisOutage(Exception ex) {
+        log.warn("Reservation endpoint failing closed: Redis unreachable ({})", ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                "Reservation service is temporarily unavailable. Please retry shortly.");
+        pd.setType(URI.create(TYPE_BASE + "redis-unavailable"));
+        pd.setTitle("Service temporarily unavailable");
+        pd.setProperty("retryable", true);
+        pd.setProperty("retryAfterSeconds", 5);
+        pd.setProperty("timestamp", OffsetDateTime.now());
         return pd;
     }
 
