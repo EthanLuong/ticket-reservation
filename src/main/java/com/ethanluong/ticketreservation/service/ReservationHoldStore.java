@@ -13,21 +13,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
- * Redis-backed coordination for reservation holds. Two primitives, two purposes:
+ * Redis-backed coordination for reservation holds.
  *
  * <ul>
- *   <li><b>TTL hold</b> at {@code hold:seat:{seatId}} — the business lock.
+ *   <li><b>TTL hold</b> at {@code hold:seat:{seatId}}
  *       Lives for the configured hold duration (10 min). Atomic via SET NX EX.</li>
- *   <li><b>Critical-section lock</b> at {@code lock:seat:{seatId}} — the
+ *   <li><b>Critical-section lock</b> at {@code lock:seat:{seatId}} —
  *       Redisson {@code RLock}. Held only for the duration of a reserve/cancel
  *       op (&lt;2 s). Serializes operations across JVMs so the reconciliation
  *       logic inside the critical section is safe from races.</li>
  * </ul>
  *
- * <p>Key schemas are indexed by seatId because the hot-path query is
- * "is this seat currently held / being modified?". The reverse direction
- * (reservation → seat) is already carried by the Postgres {@code seat_id}
- * column, so no reverse Redis index is needed.
+ * <p>Key schemas are indexed by seatId
  */
 @Component
 @RequiredArgsConstructor
@@ -64,8 +61,6 @@ public class ReservationHoldStore {
         try {
             return critical.get();
         } finally {
-            // Defensive — if the 2 s lease expired during a long GC pause,
-            // the lock is no longer ours and unlock() would throw.
             if (lock.isHeldByCurrentThread()) {
                 lock.unlock();
             }
@@ -73,7 +68,7 @@ public class ReservationHoldStore {
     }
 
     /**
-     * Attempts to place a TTL hold on the seat. Atomic SET NX EX — returns
+     * Attempts to place a TTL hold on the seat.
      * {@code true} if this caller acquired the hold, {@code false} if another
      * caller already holds it.
      */

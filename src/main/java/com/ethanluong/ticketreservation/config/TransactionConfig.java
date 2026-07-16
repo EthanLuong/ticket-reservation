@@ -5,12 +5,10 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-/**
- * Spring Boot auto-configures {@link PlatformTransactionManager} but NOT
- * {@link TransactionTemplate}. Declare one for services that need to
- * control transaction boundaries programmatically (e.g. {@code reserve()}
- * in ReservationService, which does Redis work outside the DB transaction
- * so it can compensate on rollback).
+import java.util.UUID;
+
+/** Allows more granular transaction boundary. Needed for {@link com.ethanluong.ticketreservation.service.ReservationService#reserve(UUID, UUID)}
+ * 
  */
 @Configuration
 public class TransactionConfig {

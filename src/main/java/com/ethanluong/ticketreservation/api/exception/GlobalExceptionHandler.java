@@ -18,9 +18,8 @@ import java.net.URI;
 import java.time.OffsetDateTime;
 import java.util.stream.Collectors;
 
-/**
- * RFC 7807 (ProblemDetail) responses for all exception paths.
- */
+// ProblemDetail responses for all exception paths
+
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
@@ -110,13 +109,7 @@ public class GlobalExceptionHandler {
         return pd;
     }
 
-    /**
-     * Redis is the source of truth for the TTL hold AND hosts the Redisson
-     * critical-section lock. With both unavailable, we cannot guarantee the
-     * cross-JVM serialization that prevents double-holds — fail fast with 503
-     * rather than silently fall back to a DB-only path that would violate the
-     * invariant. See ADR 0002 for the decision rationale.
-     */
+    //
     @ExceptionHandler({RedisConnectionFailureException.class, RedisException.class})
     public ProblemDetail onRedisOutage(Exception ex) {
         log.warn("Reservation endpoint failing closed: Redis unreachable ({})", ex.getMessage());

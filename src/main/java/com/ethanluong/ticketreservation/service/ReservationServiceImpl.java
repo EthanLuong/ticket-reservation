@@ -51,18 +51,12 @@ public class ReservationServiceImpl implements ReservationService {
             return tx.execute(status -> {
                 var seat = seatRepository.findById(seatId).orElseThrow();
 
-                // With both the Redisson lock AND a fresh Redis TTL hold, any
-                // HELD row in Postgres for this seat is definitionally stale —
-                // the previous hold's Redis TTL has already expired. Reconcile
-                // on the spot so the seat becomes reservable without waiting
-                // for myReservations() to be called by the prior holder.
                 if (seat.getStatus() == SeatStatus.HELD) {
                     reservationRepository
                             .findAllByStatusAndSeat_Id(ReservationStatus.HELD, seatId)
                             .forEach(r -> r.setStatus(ReservationStatus.EXPIRED));
                 } else if (seat.getStatus() != SeatStatus.AVAILABLE) {
-                    // SOLD (or any future non-AVAILABLE terminal state) is not
-                    // reconcilable — truly unavailable.
+                    // SOLD seats
                     throw new SeatNotAvailableException(seatId);
                 }
 
@@ -81,8 +75,6 @@ public class ReservationServiceImpl implements ReservationService {
             });
         } catch (RuntimeException e) {
             // @Transactional rolled back the DB, but Redis has no rollback.
-            // Compensate explicitly so the hold key doesn't block the seat
-            // for up to 10 min.
             holdStore.release(seatId);
             throw e;
         }
