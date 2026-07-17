@@ -6,7 +6,7 @@
 
 **Architecture:** Vite + React + TS in `frontend/`. One fetch wrapper owns auth headers and RFC 7807 error mapping; pages consume typed API functions. No state library — auth in React context, everything else local state + refetch. Design doc: `docs/FRONTEND-V1-DESIGN.md`.
 
-**Tech Stack:** React 18, Vite, TypeScript (strict), react-router-dom, Tailwind. No axios, no Redux/Zustand, no component libraries.
+**Tech Stack:** React 19, Vite, TypeScript (strict), react-router-dom, Tailwind. No axios, no Redux/Zustand, no component libraries. *(Amended 2026-07-16 during execution: plan originally said React 18; `npm create vite` scaffolds 19, which is current stable — accepted rather than downgraded.)*
 
 ## Global Constraints
 
