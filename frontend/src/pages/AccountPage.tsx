@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, toastFor } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
 import { useToast } from '../components/Toast';
+import { useCountdown } from '../lib/useCountdown';
 import type { ReservationResponse, ReservationStatus } from '../lib/types';
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
@@ -17,44 +18,9 @@ const STATUS_STYLES: Record<ReservationStatus, string> = {
   CANCELLED: 'border-[var(--border)] bg-transparent text-[var(--text)] opacity-60 line-through',
 };
 
-function remainingMs(expiresAt: string): number {
-  return new Date(expiresAt).getTime() - Date.now();
-}
-
-function formatRemaining(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
-}
-
-/**
- * Same recompute-from-`expiresAt` approach as HoldBanner — never a locally
- * decremented counter — so the countdown stays honest if the tab is
- * backgrounded/throttled. Calls onExpire once when it crosses zero.
- */
 function Countdown({ expiresAt, onExpire }: { expiresAt: string; onExpire(): void }) {
-  const [remaining, setRemaining] = useState(() => remainingMs(expiresAt));
-  const onExpireRef = useRef(onExpire);
-
-  useEffect(() => {
-    onExpireRef.current = onExpire;
-  }, [onExpire]);
-
-  useEffect(() => {
-    setRemaining(remainingMs(expiresAt));
-    const interval = setInterval(() => {
-      const next = remainingMs(expiresAt);
-      setRemaining(next);
-      if (next <= 0) {
-        clearInterval(interval);
-        onExpireRef.current();
-      }
-    }, 500);
-    return () => clearInterval(interval);
-  }, [expiresAt]);
-
-  return <span className="font-mono">{formatRemaining(remaining)}</span>;
+  const remaining = useCountdown(expiresAt, onExpire);
+  return <span className="font-mono">{remaining}</span>;
 }
 
 export default function AccountPage() {

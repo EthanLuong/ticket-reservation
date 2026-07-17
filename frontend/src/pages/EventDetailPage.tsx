@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, toastFor } from '../lib/api';
 import type { EventResponse, SeatResponse } from '../lib/types';
@@ -192,6 +192,14 @@ export default function EventDetailPage() {
     loadSeats({ silent: true });
   }, [loadSeats]);
 
+  // Seat labels ('A-1', 'A-2', ..., 'A-10') sort lexically as text (A-1, A-10,
+  // A-11, ..., A-2) since Postgres orders seat_label as text. Sort numerically
+  // client-side instead of re-sorting on every render.
+  const sortedSeats = useMemo(
+    () => [...seats].sort((a, b) => a.seatLabel.localeCompare(b.seatLabel, undefined, { numeric: true })),
+    [seats],
+  );
+
   if (!id) {
     return (
       <div className="mx-auto mt-16 max-w-3xl px-4">
@@ -266,7 +274,7 @@ export default function EventDetailPage() {
       )}
 
       {!seatsLoading && !seatsError && seats.length > 0 && (
-        <SeatGrid seats={seats} disabled={reserving} onSelect={handleSelectSeat} />
+        <SeatGrid seats={sortedSeats} disabled={reserving} onSelect={handleSelectSeat} />
       )}
     </div>
   );

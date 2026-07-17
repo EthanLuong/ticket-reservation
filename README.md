@@ -399,6 +399,8 @@ A React 19 + TypeScript + Tailwind v4 SPA lives in `frontend/` — login/registe
    docker compose up -d
    ```
 
+   If you change backend code (e.g. `SecurityConfig` CORS), rebuild the app image with `docker compose up -d --build app`.
+
 2. **Seed data** — there is no event-creation endpoint (`EventController` is read-only), so a fresh database has nothing to browse. Load the dev seed (2 events, 36 seats total) with:
 
    ```bash
