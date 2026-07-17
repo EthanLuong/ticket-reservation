@@ -1,7 +1,9 @@
 package com.ethanluong.ticketreservation.service;
 
+import com.ethanluong.ticketreservation.api.exception.CancellationWindowClosedException;
 import com.ethanluong.ticketreservation.api.exception.ResourceNotFoundException;
 import com.ethanluong.ticketreservation.api.exception.SeatNotAvailableException;
+import com.ethanluong.ticketreservation.api.exception.SeatOperationException;
 import com.ethanluong.ticketreservation.domain.entity.Reservation;
 import com.ethanluong.ticketreservation.domain.repository.ReservationRepository;
 import com.ethanluong.ticketreservation.domain.repository.SeatRepository;
@@ -14,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -29,6 +32,7 @@ public class ReservationServiceImpl implements ReservationService {
     private final ReservationRepository reservationRepository;
     private final ReservationHoldStore holdStore;
     private final TransactionTemplate tx;
+    private final Clock clock;
 
     @Value("${app.reservation.hold-duration-minutes}")
     private long reservationExpiryMinutes;
@@ -87,23 +91,34 @@ public class ReservationServiceImpl implements ReservationService {
                 .orElseThrow(() -> new ResourceNotFoundException("Reservation", reservationId))
                 .getSeat().getId();
 
-        return holdStore.withSeatLock(seatId, () -> doCancel(reservationId));
+        return holdStore.withSeatLock(seatId, () -> doCancel(reservationId, userId));
     }
 
-    private Reservation doCancel(UUID reservationId) {
-        Reservation cancelled = tx.execute(status -> {
+    private record CancelOutcome(Reservation cancelled, ReservationStatus reservationStatus) {}
+
+    private Reservation doCancel(UUID reservationId, UUID userId) {
+        CancelOutcome outcome = tx.execute(status -> {
             var reservation = reservationRepository.findById(reservationId).orElseThrow();
             var seat = reservation.getSeat();
+            var reservationStatus = reservation.getStatus();
+
+            if(!reservation.getUser().getId().equals(userId)) {
+                throw new ResourceNotFoundException("Reservation", reservationId);
+            } else if( reservation.getStatus() == ReservationStatus.CANCELLED || reservation.getStatus() == ReservationStatus.EXPIRED)  {
+                throw new SeatOperationException("Reservation has already been cancelled or expired");
+            } else if(reservation.getStatus() == ReservationStatus.CONFIRMED && !OffsetDateTime.now(clock).isBefore(seat.getEvent().getStartsAt().minusDays(3))){
+                throw new CancellationWindowClosedException("Too late to cancel this seat");
+            }
 
             seat.setStatus(SeatStatus.AVAILABLE);
             reservation.setStatus(ReservationStatus.CANCELLED);
 
             seatRepository.save(seat);
-            return reservationRepository.save(reservation);
+            return new CancelOutcome(reservationRepository.save(reservation), reservationStatus);
         });
+        if(outcome.reservationStatus == ReservationStatus.HELD) {holdStore.release(outcome.cancelled.getSeat().getId());}
 
-        holdStore.release(cancelled.getSeat().getId());
-        return cancelled;
+        return outcome.cancelled;
     }
 
     @Override

@@ -123,6 +123,22 @@ public class GlobalExceptionHandler {
         return pd;
     }
 
+    @ExceptionHandler(SeatOperationException.class)
+    public ProblemDetail onSeatOperationException(SeatOperationException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create(TYPE_BASE + "seat-operation-failed"));
+        pd.setTitle("Seat operation failed");
+        return pd;
+    }
+
+    @ExceptionHandler(CancellationWindowClosedException.class)
+    public ProblemDetail onCancellationWindowClosed(CancellationWindowClosedException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create(TYPE_BASE + "cancellation-window-closed"));
+        pd.setTitle("Cancellation window closed");
+        return pd;
+    }
+
     @ExceptionHandler(Exception.class)
     public ProblemDetail onUnexpected(Exception ex) {
         log.error("Unhandled exception", ex);
