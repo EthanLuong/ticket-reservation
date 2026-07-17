@@ -17,6 +17,10 @@ export default function EventsPage() {
   const [query, setQuery] = useState('');
   const navigate = useNavigate();
 
+  useEffect(() => {
+    document.title = 'Events · Ticket Reservation';
+  }, []);
+
   const load = useCallback(
     (signal?: { cancelled: boolean }) => {
       setLoading(true);

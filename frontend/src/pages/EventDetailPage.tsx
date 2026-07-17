@@ -44,6 +44,15 @@ export default function EventDetailPage() {
     };
   }, [id]);
 
+  // Generic title on mount/route change; refined with the event name once it loads.
+  useEffect(() => {
+    document.title = 'Select a seat · Ticket Reservation';
+  }, [id]);
+
+  useEffect(() => {
+    if (event) document.title = `${event.name} · Ticket Reservation`;
+  }, [event]);
+
   const loadEvent = useCallback(() => {
     if (!id) return Promise.resolve();
     const requestedId = id;

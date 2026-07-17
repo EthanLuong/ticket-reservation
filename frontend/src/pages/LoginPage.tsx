@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { toastFor } from '../lib/api';
@@ -14,6 +14,10 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const { login, register } = useAuth();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    document.title = 'Sign in · Ticket Reservation';
+  }, []);
 
   function selectTab(next: Tab) {
     setTab(next);

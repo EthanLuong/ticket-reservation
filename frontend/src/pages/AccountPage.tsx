@@ -74,6 +74,10 @@ export default function AccountPage() {
     };
   }, []);
 
+  useEffect(() => {
+    document.title = 'Account · Ticket Reservation';
+  }, []);
+
   const load = useCallback((opts?: { silent?: boolean }) => {
     if (!opts?.silent) {
       setLoading(true);

@@ -384,3 +384,56 @@ Local dev via `docker compose up` supplies all of these with sane defaults. A de
 3. Set on Railway: `SPRING_DATA_REDIS_URL=rediss://<host>:<port>` with the password embedded in the URL (`rediss://default:<password>@<host>:<port>`).
 4. Verify in `/actuator/health` — Redis component should report `UP`.
 5. Smoke test: POST a reservation, wait > 10 minutes, GET `/api/reservations/me` — the row should now be `EXPIRED` and the seat re-reservable. Validates Redis-native TTL + lazy reconciliation in production.
+
+---
+
+## Frontend
+
+A React 19 + TypeScript + Tailwind v4 SPA lives in `frontend/` — login/register, an events list, seat selection with a live hold countdown, and an account page for managing reservations. It talks to the backend over the REST API documented above.
+
+### Running it locally
+
+1. **Backend + Postgres + Redis** (Docker Compose):
+
+   ```bash
+   docker compose up -d
+   ```
+
+2. **Seed data** — there is no event-creation endpoint (`EventController` is read-only), so a fresh database has nothing to browse. Load the dev seed (2 events, 36 seats total) with:
+
+   ```bash
+   docker compose exec -T db psql -U postgres -d ticketreservation < scripts/dev-seed.sql
+   ```
+
+   Safe to re-run — every row uses a fixed UUID + `ON CONFLICT (id) DO NOTHING`.
+
+   *(Alternative to step 1+2: `./mvnw spring-boot:run` against a Postgres/Redis you already have running, then apply the seed the same way.)*
+
+3. **Frontend dev server:**
+
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+   Opens on `http://localhost:5173`. The backend's CORS config already allows this origin for `/api/**` (see `SecurityConfig.corsConfigurationSource()`) — no extra setup needed as long as the backend is reachable at `http://localhost:8080` (the default in `frontend/.env.development`).
+
+### Two-browser demo script
+
+Shows off the concurrency guarantees from a real browser, not just curl:
+
+1. Open the app in two browsers (or one normal + one incognito window) — call them **A** and **B**. Register/log in as two different users, then navigate both to the **same event**.
+2. In **A**, click an available seat.
+   - A gets a **hold banner** at the top of the page with a live countdown (10 minutes), and the seat flips to "held" in the grid.
+3. In **B**, click the **same seat** (before A's hold expires).
+   - B gets a **contention/unavailable toast** (`"Someone beat you to that seat — pick another."` or `"That seat was just taken."` depending on timing), and B's seat grid updates to show the seat as **HELD** within one poll cycle (~5s).
+4. In **A**, go to **My Reservations** (`/account`) and cancel the held reservation.
+   - The seat frees up; B's grid reflects `AVAILABLE` again within one poll cycle.
+5. Optional — the 3-day cancellation cutoff: cancelling a `CONFIRMED` reservation for an event starting within 3 days returns the `cancellation-window-closed` error, surfaced as the toast `"Too close to the event to cancel (3-day cutoff)."` The seeded events are 30/45 days out, so this path needs either a manually-adjusted `starts_at` or a purpose-built near-term event to trigger.
+
+<!-- TODO(ethan): screenshot — events list -->
+<!-- TODO(ethan): screenshot — seat grid with hold banner + countdown -->
+<!-- TODO(ethan): screenshot — contention toast in the second browser -->
+<!-- TODO(ethan): screenshot — account page with an active reservation -->
+
