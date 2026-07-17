@@ -2,11 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-
 import { AuthProvider } from './auth/AuthContext';
 import { RequireAuth } from './auth/RequireAuth';
 import LoginPage from './pages/LoginPage';
-
-// Placeholder — replaced by Task 4.
-function EventsPage() {
-  return <h1>Events</h1>;
-}
+import EventsPage from './pages/EventsPage';
 
 // Placeholder — replaced by Task 5.
 function EventDetailPage() {
