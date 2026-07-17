@@ -1,14 +1,10 @@
-import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from './auth/AuthContext';
 import { RequireAuth } from './auth/RequireAuth';
+import { ToastProvider } from './components/Toast';
 import LoginPage from './pages/LoginPage';
 import EventsPage from './pages/EventsPage';
-
-// Placeholder — replaced by Task 5.
-function EventDetailPage() {
-  const { id } = useParams();
-  return <h1>Event {id}</h1>;
-}
+import EventDetailPage from './pages/EventDetailPage';
 
 // Placeholder — replaced by Task 6.
 function AccountPage() {
@@ -18,36 +14,38 @@ function AccountPage() {
 function App() {
   return (
     <BrowserRouter>
-      <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route
-            path="/events"
-            element={
-              <RequireAuth>
-                <EventsPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/events/:id"
-            element={
-              <RequireAuth>
-                <EventDetailPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/account"
-            element={
-              <RequireAuth>
-                <AccountPage />
-              </RequireAuth>
-            }
-          />
-          <Route path="/" element={<Navigate to="/events" replace />} />
-        </Routes>
-      </AuthProvider>
+      <ToastProvider>
+        <AuthProvider>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route
+              path="/events"
+              element={
+                <RequireAuth>
+                  <EventsPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/events/:id"
+              element={
+                <RequireAuth>
+                  <EventDetailPage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/account"
+              element={
+                <RequireAuth>
+                  <AccountPage />
+                </RequireAuth>
+              }
+            />
+            <Route path="/" element={<Navigate to="/events" replace />} />
+          </Routes>
+        </AuthProvider>
+      </ToastProvider>
     </BrowserRouter>
   );
 }
