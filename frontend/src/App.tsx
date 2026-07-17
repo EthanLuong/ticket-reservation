@@ -5,11 +5,7 @@ import { ToastProvider } from './components/Toast';
 import LoginPage from './pages/LoginPage';
 import EventsPage from './pages/EventsPage';
 import EventDetailPage from './pages/EventDetailPage';
-
-// Placeholder — replaced by Task 6.
-function AccountPage() {
-  return <h1>Account</h1>;
-}
+import AccountPage from './pages/AccountPage';
 
 function App() {
   return (
