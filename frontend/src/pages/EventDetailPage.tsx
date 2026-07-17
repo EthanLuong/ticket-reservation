@@ -35,8 +35,10 @@ export default function EventDetailPage() {
   const [reserving, setReserving] = useState(false);
 
   const mountedRef = useRef(true);
+  const idRef = useRef(id);
   useEffect(() => {
     mountedRef.current = true;
+    idRef.current = id;
     return () => {
       mountedRef.current = false;
     };
@@ -44,20 +46,21 @@ export default function EventDetailPage() {
 
   const loadEvent = useCallback(() => {
     if (!id) return Promise.resolve();
+    const requestedId = id;
     setEventLoading(true);
     setEventError(null);
     return api
       .event(id)
       .then((res) => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || requestedId !== idRef.current) return;
         setEvent(res);
       })
       .catch((err) => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || requestedId !== idRef.current) return;
         setEventError(toastFor(err));
       })
       .finally(() => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || requestedId !== idRef.current) return;
         setEventLoading(false);
       });
   }, [id]);
@@ -65,6 +68,7 @@ export default function EventDetailPage() {
   const loadSeats = useCallback(
     (opts?: { silent?: boolean }) => {
       if (!id) return Promise.resolve();
+      const requestedId = id;
       if (!opts?.silent) {
         setSeatsLoading(true);
         setSeatsError(null);
@@ -72,18 +76,18 @@ export default function EventDetailPage() {
       return api
         .seats(id)
         .then((res) => {
-          if (!mountedRef.current) return;
+          if (!mountedRef.current || requestedId !== idRef.current) return;
           setSeats(res);
           setSeatsError(null);
         })
         .catch((err) => {
-          if (!mountedRef.current) return;
+          if (!mountedRef.current || requestedId !== idRef.current) return;
           // Background polls fail silently rather than clobbering a working grid
           // with an error state; only the initial load surfaces a blocking error.
           if (!opts?.silent) setSeatsError(toastFor(err));
         })
         .finally(() => {
-          if (!mountedRef.current) return;
+          if (!mountedRef.current || requestedId !== idRef.current) return;
           if (!opts?.silent) setSeatsLoading(false);
         });
     },
@@ -158,6 +162,8 @@ export default function EventDetailPage() {
             seatLabel: seat.seatLabel,
             expiresAt: reservation.expiresAt,
           });
+        } else {
+          showToast('Seat held — see My Reservations.');
         }
         loadSeats({ silent: true });
       } catch (err) {
