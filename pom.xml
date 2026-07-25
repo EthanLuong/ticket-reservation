@@ -55,6 +55,23 @@
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
 		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-redis</artifactId>
+		</dependency>
+		<!--
+		  Redisson core client (no Spring Boot starter). Redisson 3.50.0's
+		  redisson-spring-boot-starter references RedisAutoConfiguration from the
+		  Spring Boot 3.x package layout; Spring Boot 4.0 moved that class, so the
+		  starter fails to load. Using the raw client + an explicit RedissonClient
+		  @Bean (see RedissonConfig) avoids the incompatibility and keeps the
+		  config lean and explicit — no hidden auto-wiring.
+		-->
+		<dependency>
+			<groupId>org.redisson</groupId>
+			<artifactId>redisson</artifactId>
+			<version>3.50.0</version>
+		</dependency>
+		<dependency>
 			<groupId>org.flywaydb</groupId>
 			<artifactId>flyway-database-postgresql</artifactId>
 		</dependency>

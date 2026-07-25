@@ -11,5 +11,5 @@ import java.util.UUID;
 public interface ReservationRepository extends JpaRepository<Reservation, UUID> {
     List<Reservation> findAllByUser_IdOrderByCreatedAtDesc(UUID userId);
 
-    List<Reservation> findAllByStatusAndExpiresAtBefore(ReservationStatus status, OffsetDateTime cutoff);
+    List<Reservation> findAllByStatusAndSeat_Id(ReservationStatus status, UUID seatId);
 }

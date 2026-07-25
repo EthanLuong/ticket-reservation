@@ -2,8 +2,10 @@ package com.ethanluong.ticketreservation.api.exception;
 
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.client.RedisException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.security.access.AccessDeniedException;
@@ -16,9 +18,8 @@ import java.net.URI;
 import java.time.OffsetDateTime;
 import java.util.stream.Collectors;
 
-/**
- * RFC 7807 (ProblemDetail) responses for all exception paths.
- */
+// ProblemDetail responses for all exception paths
+
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
@@ -31,6 +32,17 @@ public class GlobalExceptionHandler {
         pd.setType(URI.create(TYPE_BASE + "seat-not-available"));
         pd.setTitle("Seat not available");
         pd.setProperty("seatId", ex.getSeatId());
+        pd.setProperty("timestamp", OffsetDateTime.now());
+        return pd;
+    }
+
+    @ExceptionHandler(SeatContentionException.class)
+    public ProblemDetail onSeatContention(SeatContentionException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create(TYPE_BASE + "seat-contention"));
+        pd.setTitle("Seat temporarily contested");
+        pd.setProperty("seatId", ex.getSeatId());
+        pd.setProperty("retryable", true);
         pd.setProperty("timestamp", OffsetDateTime.now());
         return pd;
     }
@@ -94,6 +106,36 @@ public class GlobalExceptionHandler {
                 "This seat is no longer available.");
         pd.setType(URI.create(TYPE_BASE + "seat-already-reserved"));
         pd.setTitle("Seat already reserved");
+        return pd;
+    }
+
+    //
+    @ExceptionHandler({RedisConnectionFailureException.class, RedisException.class})
+    public ProblemDetail onRedisOutage(Exception ex) {
+        log.warn("Reservation endpoint failing closed: Redis unreachable ({})", ex.getMessage());
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                "Reservation service is temporarily unavailable. Please retry shortly.");
+        pd.setType(URI.create(TYPE_BASE + "redis-unavailable"));
+        pd.setTitle("Service temporarily unavailable");
+        pd.setProperty("retryable", true);
+        pd.setProperty("retryAfterSeconds", 5);
+        pd.setProperty("timestamp", OffsetDateTime.now());
+        return pd;
+    }
+
+    @ExceptionHandler(SeatOperationException.class)
+    public ProblemDetail onSeatOperationException(SeatOperationException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create(TYPE_BASE + "seat-operation-failed"));
+        pd.setTitle("Seat operation failed");
+        return pd;
+    }
+
+    @ExceptionHandler(CancellationWindowClosedException.class)
+    public ProblemDetail onCancellationWindowClosed(CancellationWindowClosedException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create(TYPE_BASE + "cancellation-window-closed"));
+        pd.setTitle("Cancellation window closed");
         return pd;
     }
 

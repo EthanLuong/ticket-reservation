@@ -1,7 +1,9 @@
 package com.ethanluong.ticketreservation.service;
 
+import com.ethanluong.ticketreservation.api.exception.CancellationWindowClosedException;
 import com.ethanluong.ticketreservation.api.exception.ResourceNotFoundException;
 import com.ethanluong.ticketreservation.api.exception.SeatNotAvailableException;
+import com.ethanluong.ticketreservation.api.exception.SeatOperationException;
 import com.ethanluong.ticketreservation.domain.entity.Reservation;
 import com.ethanluong.ticketreservation.domain.repository.ReservationRepository;
 import com.ethanluong.ticketreservation.domain.repository.SeatRepository;
@@ -12,7 +14,10 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -25,65 +30,129 @@ public class ReservationServiceImpl implements ReservationService {
     private final SeatRepository seatRepository;
     private final UserRepository userRepository;
     private final ReservationRepository reservationRepository;
+    private final ReservationHoldStore holdStore;
+    private final TransactionTemplate tx;
+    private final Clock clock;
 
     @Value("${app.reservation.hold-duration-minutes}")
     private long reservationExpiryMinutes;
 
     @Override
-    @Transactional
     public Reservation reserve(UUID userId, UUID seatId) {
-        var seat = seatRepository.findById(seatId).orElseThrow();
-        if(seat.getStatus() != SeatStatus.AVAILABLE){
+        return holdStore.withSeatLock(seatId, () -> doReserve(userId, seatId));
+    }
+
+    private Reservation doReserve(UUID userId, UUID seatId) {
+        UUID reservationId = UUID.randomUUID();
+        Duration ttl = Duration.ofMinutes(reservationExpiryMinutes);
+
+        // Redis-first: SET NX EX gives atomic collision detection under the lock.
+        if (!holdStore.tryHold(seatId, reservationId, ttl)) {
             throw new SeatNotAvailableException(seatId);
         }
 
-        seat.setStatus(SeatStatus.HELD);
-        seatRepository.saveAndFlush(seat);
+        try {
+            return tx.execute(status -> {
+                var seat = seatRepository.findById(seatId).orElseThrow();
 
-        Reservation newReservation = Reservation.builder()
-                .user(userRepository.getReferenceById(userId))
-                .seat(seat)
-                .status(ReservationStatus.HELD)
-                .expiresAt(OffsetDateTime.now().plusMinutes(reservationExpiryMinutes))
-                .build();
+                if (seat.getStatus() == SeatStatus.HELD) {
+                    reservationRepository
+                            .findAllByStatusAndSeat_Id(ReservationStatus.HELD, seatId)
+                            .forEach(r -> r.setStatus(ReservationStatus.EXPIRED));
+                } else if (seat.getStatus() != SeatStatus.AVAILABLE) {
+                    // SOLD seats
+                    throw new SeatNotAvailableException(seatId);
+                }
 
-        return reservationRepository.save(newReservation);
+                seat.setStatus(SeatStatus.HELD);
+                seatRepository.saveAndFlush(seat);
 
+                Reservation newReservation = Reservation.builder()
+                        .id(reservationId)
+                        .user(userRepository.getReferenceById(userId))
+                        .seat(seat)
+                        .status(ReservationStatus.HELD)
+                        .expiresAt(OffsetDateTime.now().plusMinutes(reservationExpiryMinutes))
+                        .build();
+
+                return reservationRepository.save(newReservation);
+            });
+        } catch (RuntimeException e) {
+            // @Transactional rolled back the DB, but Redis has no rollback.
+            holdStore.release(seatId);
+            throw e;
+        }
     }
 
     @Override
-    @Transactional
     public Reservation cancel(UUID userId, UUID reservationId) {
-        var reservation = reservationRepository.findById(reservationId).orElseThrow();
-        var seat = reservation.getSeat();
+        // Re-fetch seatId outside the lock so we can key the lock on it.
+        UUID seatId = reservationRepository.findById(reservationId)
+                .orElseThrow(() -> new ResourceNotFoundException("Reservation", reservationId))
+                .getSeat().getId();
 
-        seat.setStatus(SeatStatus.AVAILABLE);
-        reservation.setStatus(ReservationStatus.CANCELLED);
+        return holdStore.withSeatLock(seatId, () -> doCancel(reservationId, userId));
+    }
 
-        seatRepository.save(seat);
-        return reservationRepository.save(reservation);
+    private record CancelOutcome(Reservation cancelled, ReservationStatus reservationStatus) {}
+
+    private Reservation doCancel(UUID reservationId, UUID userId) {
+        CancelOutcome outcome = tx.execute(status -> {
+            var reservation = reservationRepository.findById(reservationId).orElseThrow();
+            var seat = reservation.getSeat();
+            var reservationStatus = reservation.getStatus();
+
+            if(!reservation.getUser().getId().equals(userId)) {
+                throw new ResourceNotFoundException("Reservation", reservationId);
+            } else if( reservation.getStatus() == ReservationStatus.CANCELLED || reservation.getStatus() == ReservationStatus.EXPIRED)  {
+                throw new SeatOperationException("Reservation has already been cancelled or expired");
+            } else if(reservation.getStatus() == ReservationStatus.CONFIRMED && !OffsetDateTime.now(clock).isBefore(seat.getEvent().getStartsAt().minusDays(3))){
+                throw new CancellationWindowClosedException("Too late to cancel this seat");
+            }
+
+            seat.setStatus(SeatStatus.AVAILABLE);
+            reservation.setStatus(ReservationStatus.CANCELLED);
+
+            seatRepository.save(seat);
+            return new CancelOutcome(reservationRepository.save(reservation), reservationStatus);
+        });
+        if(outcome.reservationStatus == ReservationStatus.HELD) {holdStore.release(outcome.cancelled.getSeat().getId());}
+
+        return outcome.cancelled;
     }
 
     @Override
-    @Transactional(readOnly = true)
     public List<Reservation> myReservations(UUID userId) {
         if (!userRepository.existsById(userId)) {
             throw new ResourceNotFoundException("User", userId);
         }
-        return reservationRepository.findAllByUser_IdOrderByCreatedAtDesc(userId);
-    }
 
-    @Override
-    @Transactional
-    public int sweepExpired() {
-        var expired = reservationRepository.findAllByStatusAndExpiresAtBefore(
-                ReservationStatus.HELD, OffsetDateTime.now());
+        List<Reservation> reservations = tx.execute(status ->
+                reservationRepository.findAllByUser_IdOrderByCreatedAtDesc(userId));
 
-        for (var reservation : expired) {
-            reservation.setStatus(ReservationStatus.EXPIRED);
-            reservation.getSeat().setStatus(SeatStatus.AVAILABLE);
+        // Lazy reconciliation: a HELD row whose Redis TTL hold has expired is
+        // stale. Flip to EXPIRED on read, free its seat. Self-healing without
+        // a sweeper process.
+        List<Reservation> stale = reservations.stream()
+                .filter(r -> r.getStatus() == ReservationStatus.HELD)
+                .filter(r -> !holdStore.hasHold(r.getSeat().getId()))
+                .toList();
+
+        if (!stale.isEmpty()) {
+            tx.executeWithoutResult(status -> {
+                for (Reservation r : stale) {
+                    var managed = reservationRepository.findById(r.getId()).orElseThrow();
+                    var seat = managed.getSeat();
+                    managed.setStatus(ReservationStatus.EXPIRED);
+                    if (seat.getStatus() == SeatStatus.HELD) {
+                        seat.setStatus(SeatStatus.AVAILABLE);
+                    }
+                }
+            });
+            // Reflect the flip in the returned list so callers see consistent state.
+            stale.forEach(r -> r.setStatus(ReservationStatus.EXPIRED));
         }
 
-        return expired.size();
+        return reservations;
     }
 }

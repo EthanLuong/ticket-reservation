@@ -1,5 +1,6 @@
 package com.ethanluong.ticketreservation;
 
+import com.ethanluong.ticketreservation.api.exception.SeatContentionException;
 import com.ethanluong.ticketreservation.api.exception.SeatNotAvailableException;
 import com.ethanluong.ticketreservation.domain.entity.Event;
 import com.ethanluong.ticketreservation.domain.entity.Seat;
@@ -108,7 +109,9 @@ class SeatReservationConcurrencyIT {
         /** DB level violation */
         FAILURE_DATA_INTEGRITY,
         /** Anything else — indicates a bug, not a correctly-lost race. */
-        FAILURE_OTHER
+        FAILURE_OTHER,
+        /** Seat contention exception */
+        FAILURE_CONTESTED
     }
 
     /**
@@ -135,7 +138,10 @@ class SeatReservationConcurrencyIT {
                         return Outcome.FAILURE_OPTIMISTIC_LOCK;
                     } catch (DataIntegrityViolationException e) {
                         return Outcome.FAILURE_DATA_INTEGRITY;
-                    } catch (Exception e) {
+                    } catch (SeatContentionException e){
+                        return Outcome.FAILURE_CONTESTED;
+                    }
+                    catch (Exception e) {
                         log.warn("Unexpected failure in racing thread", e);
                         return Outcome.FAILURE_OTHER;
                     }
