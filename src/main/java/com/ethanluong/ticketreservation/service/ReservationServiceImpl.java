@@ -10,6 +10,7 @@ import com.ethanluong.ticketreservation.domain.repository.SeatRepository;
 import com.ethanluong.ticketreservation.domain.repository.UserRepository;
 import com.ethanluong.ticketreservation.domain.type.ReservationStatus;
 import com.ethanluong.ticketreservation.domain.type.SeatStatus;
+import com.ethanluong.ticketreservation.saga.SagaOrchestrator;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -33,6 +34,7 @@ public class ReservationServiceImpl implements ReservationService {
     private final ReservationHoldStore holdStore;
     private final TransactionTemplate tx;
     private final Clock clock;
+    private final SagaOrchestrator sagaOrchestrator;
 
     @Value("${app.reservation.hold-duration-minutes}")
     private long reservationExpiryMinutes;
@@ -75,7 +77,10 @@ public class ReservationServiceImpl implements ReservationService {
                         .expiresAt(OffsetDateTime.now().plusMinutes(reservationExpiryMinutes))
                         .build();
 
-                return reservationRepository.save(newReservation);
+
+                Reservation reservation = reservationRepository.save(newReservation);
+                sagaOrchestrator.start(reservationId, seat.getPriceCents());
+                return reservation;
             });
         } catch (RuntimeException e) {
             // @Transactional rolled back the DB, but Redis has no rollback.
