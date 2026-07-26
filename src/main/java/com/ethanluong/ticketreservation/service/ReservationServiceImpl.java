@@ -11,6 +11,7 @@ import com.ethanluong.ticketreservation.domain.repository.UserRepository;
 import com.ethanluong.ticketreservation.domain.type.ReservationStatus;
 import com.ethanluong.ticketreservation.domain.type.SeatStatus;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,6 +26,7 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ReservationServiceImpl implements ReservationService {
 
     private final SeatRepository seatRepository;
@@ -79,7 +81,12 @@ public class ReservationServiceImpl implements ReservationService {
             });
         } catch (RuntimeException e) {
             // @Transactional rolled back the DB, but Redis has no rollback.
-            holdStore.release(seatId);
+            if (!holdStore.release(seatId, reservationId)) {
+                // Should be impossible: we SET this key moments ago, inside the seat lock,
+                // with a 10-min TTL. A miss here means Redis lost/changed the key underneath us.
+                log.warn("reserve compensation: hold for seat {} not owned by reservation {} moments after creation",
+                        seatId, reservationId);
+            }
             throw e;
         }
     }
@@ -116,7 +123,11 @@ public class ReservationServiceImpl implements ReservationService {
             seatRepository.save(seat);
             return new CancelOutcome(reservationRepository.save(reservation), reservationStatus);
         });
-        if(outcome.reservationStatus == ReservationStatus.HELD) {holdStore.release(outcome.cancelled.getSeat().getId());}
+        if (outcome.reservationStatus == ReservationStatus.HELD
+                && !holdStore.release(outcome.cancelled.getSeat().getId(), reservationId)) {
+            // Expected race: the hold TTL-expired between loading the reservation and releasing.
+            log.info("cancel: hold for reservation {} already expired before release", reservationId);
+        }
 
         return outcome.cancelled;
     }

@@ -11,6 +11,7 @@ import com.ethanluong.ticketreservation.domain.repository.SeatRepository;
 import com.ethanluong.ticketreservation.domain.repository.UserRepository;
 import com.ethanluong.ticketreservation.domain.type.ReservationStatus;
 import com.ethanluong.ticketreservation.domain.type.SeatStatus;
+import com.ethanluong.ticketreservation.service.ReservationHoldStore;
 import com.ethanluong.ticketreservation.service.ReservationService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,6 +23,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -48,6 +50,7 @@ class RedisTTLHoldIT {
     @Autowired private ReservationRepository reservationRepository;
     @Autowired private PasswordEncoder passwordEncoder;
     @Autowired private StringRedisTemplate redis;
+    @Autowired private ReservationHoldStore reservationHoldStore;
 
     private UUID userId;
     private UUID otherUserId;
@@ -145,6 +148,20 @@ class RedisTTLHoldIT {
     }
 
     @Test
+    @DisplayName("release() wrong owner fails to release hold")
+    void release_wrongOwner() {
+        UUID reserveId = UUID.randomUUID();
+        reservationHoldStore.tryHold(seatId, reserveId, Duration.ofSeconds(10));
+
+        assertThat(reservationHoldStore.release(seatId, UUID.randomUUID())).isFalse();
+        assertThat(redis.opsForValue().get(holdKey(seatId))).isEqualTo(reserveId.toString());
+
+        assertThat(reservationHoldStore.release(seatId, reserveId)).isTrue();
+        assertThat(redis.hasKey(holdKey(seatId))).isFalse();
+    }
+
+
+    @Test
     @DisplayName("reserve() reconciles stale HELD row when Redis TTL has expired")
     void reserve_reconcilesStaleHeldRowOnExpiredTtl() {
         // Simulate an expired hold: DB still says HELD but the Redis TTL has lapsed.
@@ -179,4 +196,5 @@ class RedisTTLHoldIT {
         var seat = seatRepository.findById(seatId).orElseThrow();
         assertThat(seat.getStatus()).isEqualTo(SeatStatus.AVAILABLE);
     }
+
 }

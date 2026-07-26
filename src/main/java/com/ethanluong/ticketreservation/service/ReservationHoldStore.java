@@ -5,9 +5,11 @@ import lombok.RequiredArgsConstructor;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -33,6 +35,7 @@ public class ReservationHoldStore {
     private static final long LOCK_WAIT_MS = 100L;
     private static final long LOCK_LEASE_MS = 2_000L;
 
+    private final RedisScript<Long> releaseHoldScript;
     private final StringRedisTemplate redis;
     private final RedissonClient redisson;
 
@@ -89,12 +92,17 @@ public class ReservationHoldStore {
     }
 
     /**
-     * Releases the hold for a seat. Idempotent — DEL on a missing key is a
-     * no-op, so this is safe whether the key is still live, already
-     * TTL-expired, or never existed.
+     * Releases the hold for a seat <b>only if this reservation still owns it</b> —
+     * an atomic GET-compare-DEL Lua script, so an expired-and-reclaimed hold can
+     * never be deleted out from under its new owner.
+     *
+     * @return {@code true} if the owned hold was deleted; {@code false} if the key
+     *         was absent or owned by another reservation (callers decide what that
+     *         means in their context)
      */
-    public void release(UUID seatId) {
-        redis.delete(holdKey(seatId));
+    public boolean release(UUID seatId, UUID reservationId) {
+        Long deleted = redis.execute(releaseHoldScript, List.of(holdKey(seatId)), reservationId.toString());
+        return deleted != null && deleted == 1L;
     }
 
     private String holdKey(UUID seatId) {
