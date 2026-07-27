@@ -6,7 +6,7 @@
 > - Phase 0 (reservation foundation) — ✅ Shipped
 > - Phase 1 (Redis holds + distributed lock) — ✅ Shipped
 > - Phase 2 (payment + saga) — Designed, not yet built
-> - Phase 3 (frontend) — Designed, not yet built
+> - Phase 3 (frontend) — ✅ Shipped
 > - Phase 4 (scale signals) — Designed, not yet built
 > - Phase 5 (tickets + polish) — Designed, not yet built
 >

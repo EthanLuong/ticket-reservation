@@ -354,7 +354,7 @@ Run the full suite (17 tests across 6 classes):
 | **0. Reservation foundation** | Entities, JWT auth, `@Version` optimistic lock, TTL sweeper, Testcontainers race proof, Railway deploy | ✅ Shipped |
 | **1. Redis holds + distributed lock** | Redis-native TTL holds, Redisson `RLock` per seat, sweeper retired, lazy reconciliation, fail-closed (503) on Redis outage | ✅ Shipped |
 | **2. Payment + saga** | Extract payment service; Kafka between services; outbox; saga orchestration with timeout compensation | Planned |
-| **3. Frontend** | Next.js 14 browse + seat-map booking flow | Planned |
+| **3. Frontend** | React 19 SPA: event listing, seat selection, hold countdown, account/cancel | ✅ Shipped |
 | **4. Scale signals** | Rate limiting (Bucket4j), Resilience4j circuit breakers, Grafana dashboards, hot-event caching | Planned |
 | **5. Tickets + polish** | Ticket issuance service, QR validation, refund flow, group bookings | Planned |
 
@@ -434,8 +434,4 @@ Shows off the concurrency guarantees from a real browser, not just curl:
    - The seat frees up; B's grid reflects `AVAILABLE` again within one poll cycle.
 5. Optional — the 3-day cancellation cutoff: cancelling a `CONFIRMED` reservation for an event starting within 3 days returns the `cancellation-window-closed` error, surfaced as the toast `"Too close to the event to cancel (3-day cutoff)."` The seeded events are 30/45 days out, so this path needs either a manually-adjusted `starts_at` or a purpose-built near-term event to trigger.
 
-<!-- TODO(ethan): screenshot — events list -->
-<!-- TODO(ethan): screenshot — seat grid with hold banner + countdown -->
-<!-- TODO(ethan): screenshot — contention toast in the second browser -->
-<!-- TODO(ethan): screenshot — account page with an active reservation -->
 

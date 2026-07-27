@@ -1,6 +1,6 @@
 # Frontend v1 — Design
 
-**Date:** 2026-07-16 · **Status:** approved (design), not started (build)
+**Date:** 2026-07-16 · **Status:** ✅ shipped (2026-07-27)
 **Purpose:** portfolio demo layer over the existing Spring Boot API. The backend stays the star;
 the frontend makes its concurrency story (Redis holds, TTL, contention) visible and clickable.
 LLM-generated; reviewed like a junior PR — run it, click it, read the API layer.
