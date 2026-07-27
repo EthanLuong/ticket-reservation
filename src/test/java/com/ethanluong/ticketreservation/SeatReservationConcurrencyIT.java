@@ -7,6 +7,8 @@ import com.ethanluong.ticketreservation.domain.entity.Seat;
 import com.ethanluong.ticketreservation.domain.entity.User;
 import com.ethanluong.ticketreservation.domain.repository.EventRepository;
 import com.ethanluong.ticketreservation.domain.repository.ReservationRepository;
+import com.ethanluong.ticketreservation.domain.repository.SagaRepository;
+import com.ethanluong.ticketreservation.domain.repository.OutboxEntryRepository;
 import com.ethanluong.ticketreservation.domain.repository.SeatRepository;
 import com.ethanluong.ticketreservation.domain.repository.UserRepository;
 import com.ethanluong.ticketreservation.domain.type.SeatStatus;
@@ -56,6 +58,8 @@ class SeatReservationConcurrencyIT {
     @Autowired private EventRepository eventRepository;
     @Autowired private SeatRepository seatRepository;
     @Autowired private ReservationRepository reservationRepository;
+    @Autowired private SagaRepository sagaRepository;
+    @Autowired private OutboxEntryRepository outboxEntryRepository;
     @Autowired private PasswordEncoder passwordEncoder;
 
     private UUID seatId;
@@ -92,6 +96,9 @@ class SeatReservationConcurrencyIT {
 
     @AfterEach
     void cleanup() {
+        // FK order: sagas reference reservations — children first (mirror of insert order)
+        sagaRepository.deleteAllInBatch();
+        outboxEntryRepository.deleteAllInBatch();
         reservationRepository.deleteAllInBatch();
         seatRepository.deleteAllInBatch();
         eventRepository.deleteAllInBatch();

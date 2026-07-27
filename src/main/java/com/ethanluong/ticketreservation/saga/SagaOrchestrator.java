@@ -6,6 +6,8 @@ import com.ethanluong.ticketreservation.domain.repository.OutboxEntryRepository;
 import com.ethanluong.ticketreservation.domain.repository.SagaRepository;
 import com.ethanluong.ticketreservation.domain.type.SagaState;
 import com.ethanluong.ticketreservation.saga.events.ChargeCard;
+import com.ethanluong.ticketreservation.saga.events.EventEnvelope;
+import com.ethanluong.ticketreservation.saga.events.EventTypes;
 import com.ethanluong.ticketreservation.saga.events.KafkaTopics;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -42,12 +44,20 @@ public class SagaOrchestrator {
         saga.setReservationId(reservationId);
         saga.setState(SagaState.AWAITING_PAYMENT);
 
-        ChargeCard chargeCard = new ChargeCard(UUID.randomUUID(), sagaId, OffsetDateTime.now(clock), amountCents);
+        // ADR 0003: the outbox row stores the serialized ENVELOPE, not the bare payload —
+        // the eventType discriminator must ride inside the JSON so the (pre-serialized)
+        // outbox publisher never needs to know the type.
+        EventEnvelope envelope = new EventEnvelope(
+                UUID.randomUUID(),
+                EventTypes.CHARGE_CARD,
+                1, OffsetDateTime.now(clock),
+                sagaId,
+                objectMapper.valueToTree(new ChargeCard(amountCents)));
 
         OutboxEntry outboxEntry = new OutboxEntry();
         outboxEntry.setAggregateType("Saga");
         outboxEntry.setAggregateId(sagaId);
-        outboxEntry.setPayload(objectMapper.writeValueAsString(chargeCard));
+        outboxEntry.setPayload(objectMapper.writeValueAsString(envelope));
         outboxEntry.setTopic(KafkaTopics.PAYMENT_CMD);
 
         sagaRepository.save(saga);
