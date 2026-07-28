@@ -84,7 +84,7 @@ export default function EventsPage() {
 
       {!loading && error && (
         <div className="flex flex-col items-center gap-3 py-12">
-          <p className="text-sm text-red-600">{error}</p>
+          <p className="text-sm text-[var(--danger)]">{error}</p>
           <button
             type="button"
             onClick={() => load()}

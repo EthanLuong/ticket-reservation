@@ -249,7 +249,7 @@ export default function EventDetailPage() {
 
       {!eventLoading && eventError && (
         <div className="flex flex-col items-center gap-3 py-6">
-          <p className="text-sm text-red-600">{eventError}</p>
+          <p className="text-sm text-[var(--danger)]">{eventError}</p>
           <button
             type="button"
             onClick={() => loadEvent()}
@@ -296,7 +296,7 @@ export default function EventDetailPage() {
 
       {!seatsLoading && seatsError && (
         <div className="flex flex-col items-center gap-3 py-12">
-          <p className="text-sm text-red-600">{seatsError}</p>
+          <p className="text-sm text-[var(--danger)]">{seatsError}</p>
           <button
             type="button"
             onClick={() => loadSeats()}
