@@ -18,6 +18,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
@@ -34,6 +35,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Integration test for the seat-reservation concurrency invariant: at most one
@@ -187,4 +189,20 @@ class SeatReservationConcurrencyIT {
         assertThat(seat.getVersion()).isEqualTo(1L);
     }
 
+    @Test
+    @DisplayName("C5 backstop: @Version rejects a stale write — second writer with an old version fails")
+    void versionColumn_rejectsStaleWrite() {
+        // Two detached copies of the same row, same version. This is the raw backstop
+        // under all the locking above it: even if every lock failed, a write based on
+        // a stale read cannot commit.
+        Seat first = seatRepository.findById(seatId).orElseThrow();
+        Seat stale = seatRepository.findById(seatId).orElseThrow();
+
+        first.setStatus(SeatStatus.HELD);
+        seatRepository.saveAndFlush(first); // bumps version in the DB
+
+        stale.setStatus(SeatStatus.SOLD);  // still carries the old version
+        assertThatThrownBy(() -> seatRepository.saveAndFlush(stale))
+                .isInstanceOf(ObjectOptimisticLockingFailureException.class);
+    }
 }
