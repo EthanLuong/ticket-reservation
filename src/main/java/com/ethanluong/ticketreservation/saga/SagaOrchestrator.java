@@ -10,6 +10,7 @@ import com.ethanluong.ticketreservation.domain.repository.ReservationRepository;
 import com.ethanluong.ticketreservation.domain.repository.SagaRepository;
 import com.ethanluong.ticketreservation.domain.type.ReservationStatus;
 import com.ethanluong.ticketreservation.domain.type.SagaState;
+import com.ethanluong.ticketreservation.saga.events.CancelChargeIfStarted;
 import com.ethanluong.ticketreservation.saga.events.ChargeCard;
 import com.ethanluong.ticketreservation.saga.events.EventEnvelope;
 import com.ethanluong.ticketreservation.saga.events.EventTypes;
@@ -90,7 +91,7 @@ public class SagaOrchestrator {
                 .consumer(CONSUMER)
                 .build());
 
-        Optional<Saga> sagaOptional = sagaRepository.findById(envelope.sagaId());
+        Optional<Saga> sagaOptional = sagaRepository.findWithLockById(envelope.sagaId());
         if(sagaOptional.isEmpty()){
             log.warn("payment event {}: unknown saga {} — skipped", envelope.eventId(), envelope.sagaId());
             return;
@@ -127,6 +128,42 @@ public class SagaOrchestrator {
         }
     }
 
+    @Transactional(propagation = REQUIRED)
+    public void timeoutSaga(UUID sagaId){
+        Optional<Saga> sagaOptional = sagaRepository.findWithLockById(sagaId);
+        if(sagaOptional.isEmpty()){
+            log.warn("timeout sweep: saga [{}] vanished — skipped", sagaId);
+            return;
+        }
+        Saga currentSaga = sagaOptional.get();
+        // Re-check AFTER the lock: a PaymentConfirmed may have won the race since the
+        // sweep's id-fetch — normal outcome, skip (same principle as notInState above).
+        if(notInState(currentSaga, SagaState.AWAITING_PAYMENT)){
+            log.info("timeout sweep: saga [{}] in state {} — skipped (paid mid-sweep)", sagaId, currentSaga.getState());
+            return;
+        }
+
+        currentSaga.setState(SagaState.COMPENSATING);
+        reservationRepository.getReferenceById(currentSaga.getReservationId()).setStatus(ReservationStatus.CANCELLED);
+
+        EventEnvelope envelope = new EventEnvelope(
+                UUID.randomUUID(),
+                EventTypes.CANCEL_CHARGE_IF_STARTED,
+                1, OffsetDateTime.now(clock), sagaId,
+                objectMapper.valueToTree(new CancelChargeIfStarted())
+        );
+
+        OutboxEntry outboxEntry = new OutboxEntry();
+        outboxEntry.setAggregateType("Saga");
+        outboxEntry.setAggregateId(sagaId);
+        outboxEntry.setPayload(objectMapper.writeValueAsString(envelope));
+        outboxEntry.setTopic(KafkaTopics.PAYMENT_CMD);
+
+        // currentSaga is managed inside this tx — dirty checking flushes it at commit,
+        // same as handlePaymentEvent; only the new outbox row needs an explicit save.
+        outboxEntryRepository.save(outboxEntry);
+    }
+
     /** Wrong-state guard: at-least-once delivery makes stale/out-of-order events normal — log, don't throw. */
     private boolean notInState(Saga saga, SagaState expected, EventEnvelope envelope) {
         if (saga.getState() == expected) {
@@ -135,6 +172,10 @@ public class SagaOrchestrator {
         log.warn("payment event {} ({}): saga {} in state {}, expected {} — skipped",
                 envelope.eventId(), envelope.eventType(), saga.getId(), saga.getState(), expected);
         return true;
+    }
+
+    private boolean notInState(Saga saga, SagaState expected) {
+        return(saga.getState() != expected);
     }
 
 }
