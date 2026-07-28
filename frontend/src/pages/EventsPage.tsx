@@ -60,7 +60,7 @@ export default function EventsPage() {
   }, [events, query]);
 
   return (
-    <div className="mx-auto mt-16 max-w-3xl px-4">
+    <div className="mx-auto mt-8 max-w-3xl px-4 pb-16">
       <h1>Events</h1>
 
       <input

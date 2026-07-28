@@ -9,6 +9,14 @@
   --accent: #aa3bff;
   --accent-bg: rgba(170, 59, 255, 0.1);
   --accent-border: rgba(170, 59, 255, 0.5);
+  /* Status semantics — reservation lifecycle is the product's core information */
+  --ok: #15803d;
+  --ok-bg: rgba(21, 128, 61, 0.08);
+  --ok-border: rgba(21, 128, 61, 0.4);
+  --warn: #b45309;
+  --warn-bg: rgba(180, 83, 9, 0.08);
+  --warn-border: rgba(180, 83, 9, 0.4);
+  --danger: #dc2626;
   --shadow:
     rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
 
@@ -41,6 +49,13 @@
     --accent: #c084fc;
     --accent-bg: rgba(192, 132, 252, 0.15);
     --accent-border: rgba(192, 132, 252, 0.5);
+    --ok: #4ade80;
+    --ok-bg: rgba(74, 222, 128, 0.12);
+    --ok-border: rgba(74, 222, 128, 0.4);
+    --warn: #fbbf24;
+    --warn-bg: rgba(251, 191, 36, 0.1);
+    --warn-border: rgba(251, 191, 36, 0.4);
+    --danger: #f87171;
     --shadow:
       rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
   }
@@ -97,4 +112,18 @@ code {
   line-height: 135%;
   padding: 4px 8px;
   background: var(--code-bg);
+}
+
+/* In-flight status dot — pulses only while a state is genuinely unsettled. */
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.status-dot-pulse {
+  animation: status-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-dot-pulse {
+    animation: none;
+  }
 }
