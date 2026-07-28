@@ -434,8 +434,8 @@ Shows off the concurrency guarantees from a real browser, not just curl:
    - The seat frees up; B's grid reflects `AVAILABLE` again within one poll cycle.
 5. Optional — the 3-day cancellation cutoff: cancelling a `CONFIRMED` reservation for an event starting within 3 days returns the `cancellation-window-closed` error, surfaced as the toast `"Too close to the event to cancel (3-day cutoff)."` The seeded events are 30/45 days out, so this path needs either a manually-adjusted `starts_at` or a purpose-built near-term event to trigger.
 
-<!-- TODO(ethan): screenshot — events list -->
-<!-- TODO(ethan): screenshot — seat grid with hold banner + countdown -->
-<!-- TODO(ethan): screenshot — contention toast in the second browser -->
-<!-- TODO(ethan): screenshot — account page with an active reservation -->
+![Events list](docs/img/events-list.png)
+![Seat grid with an active hold — countdown ticking, payment confirming](docs/img/seat-grid-hold.png)
+![Second buyer racing the same seat — contention toast](docs/img/contention-toast.png)
+![My reservations — live saga status chips and hold countdowns](docs/img/account-reservations.png)
 
