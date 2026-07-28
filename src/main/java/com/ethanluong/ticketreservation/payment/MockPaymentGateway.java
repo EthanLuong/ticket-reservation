@@ -5,8 +5,11 @@ import org.springframework.stereotype.Component;
 import java.util.UUID;
 
 /**
- * Stand-in for a real PSP (Stripe et al). SKELETON — the decision rule is yours.
- * LLM-BUILT structure 2026-07-27; TODO(you) marks the part you own.
+ * Stand-in for a real PSP (Stripe et al). Deterministic rule (Ethan, 2026-07-27):
+ * amounts STRICTLY greater than 10_000 cents decline with "Suspicious payment" —
+ * so exactly $100.00 approves. Approvals carry {@code gatewayRef = "mock-" + sagaId}.
+ * Demo tripwire: the seeded VIP-1 seat ($150.00) declines; every $50 seat approves.
+ * No randomness on purpose — tests and demos pick the outcome by picking the amount.
  */
 @Component
 public class MockPaymentGateway {
@@ -24,12 +27,7 @@ public class MockPaymentGateway {
     }
 
     public ChargeResult charge(UUID sagaId, long amountCents) {
-        // TODO(you): a DETERMINISTIC rule, not randomness — tests (and demos) must be able
-        //  to force both outcomes by choosing the amount. Convention to consider: approve
-        //  everything except a magic threshold (e.g. amounts >= $100.00 decline with
-        //  "insufficient_funds"), gatewayRef = "mock-" + sagaId. Whatever rule you pick,
-        //  write it in the class javadoc — it becomes part of the demo script.
-        throw new UnsupportedOperationException("TODO(you): deterministic charge rule");
+        return amountCents > 10_000 ? ChargeResult.declined("Suspicious payment") : ChargeResult.approved("mock-" + sagaId);
     }
 
     // Note: no refund(...) method on purpose. The mock has no money to move — a refund

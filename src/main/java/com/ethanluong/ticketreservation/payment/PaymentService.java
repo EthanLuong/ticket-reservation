@@ -2,9 +2,13 @@ package com.ethanluong.ticketreservation.payment;
 
 import com.ethanluong.ticketreservation.domain.entity.OutboxEntry;
 import com.ethanluong.ticketreservation.domain.repository.OutboxEntryRepository;
+import com.ethanluong.ticketreservation.saga.events.ChargeCard;
 import com.ethanluong.ticketreservation.saga.events.EventEnvelope;
 import com.ethanluong.ticketreservation.saga.events.EventTypes;
 import com.ethanluong.ticketreservation.saga.events.KafkaTopics;
+import com.ethanluong.ticketreservation.saga.events.PaymentConfirmed;
+import com.ethanluong.ticketreservation.saga.events.PaymentFailed;
+import com.ethanluong.ticketreservation.saga.events.RefundConfirmed;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -54,26 +58,35 @@ public class PaymentService {
     }
 
     private void handleChargeCard(EventEnvelope envelope) {
-        // TODO(you): the card's core — Q3 in practice, all inside THIS transaction:
-        //  1. ChargeCard cmd = objectMapper.treeToValue(envelope.payload(), ChargeCard.class)
-        //  2. MockPaymentGateway.ChargeResult result = gateway.charge(envelope.sagaId(), cmd.amountCents())
-        //  3. save a Payment row — status AUTHORIZED or FAILED, gatewayRef/declineReason from result
-        //  4. emitPaymentEvent(PAYMENT_CONFIRMED or PAYMENT_FAILED, envelope.sagaId(), payload record)
-        //  Payment row + dedup marker + outbox row commit atomically = the payment side's own
-        //  dual-write, solved by the same outbox you already built. Keep it to ONE outbox row
-        //  per transaction (created_at is tx-scoped — ordering within a tx is undefined; see briefing).
-        throw new UnsupportedOperationException("TODO(you): ChargeCard — see comment above");
+        ChargeCard cmd = objectMapper.treeToValue(envelope.payload(), ChargeCard.class);
+        MockPaymentGateway.ChargeResult result = gateway.charge(envelope.sagaId(), cmd.amountCents());
+
+        paymentRepository.save(Payment.builder()
+                .sagaId(envelope.sagaId())
+                .amountCents(cmd.amountCents())
+                .status(result.approved() ? PaymentStatus.AUTHORIZED : PaymentStatus.FAILED)
+                .gatewayRef(result.gatewayRef())
+                .build());
+
+        if (result.approved()) {
+            emitPaymentEvent(EventTypes.PAYMENT_CONFIRMED, envelope.sagaId(), new PaymentConfirmed());
+        } else {
+            emitPaymentEvent(EventTypes.PAYMENT_FAILED, envelope.sagaId(), new PaymentFailed());
+        }
     }
 
     private void handleCancelChargeIfStarted(EventEnvelope envelope) {
-        // TODO(you): "if you charged, refund; if you didn't, don't — payment decides."
-        //  paymentRepository.findBySagaId(envelope.sagaId()):
-        //    - AUTHORIZED  → set status REFUNDED, emit REFUND_CONFIRMED
-        //    - absent/FAILED → nothing to refund... but the saga is parked in COMPENSATING
-        //      waiting for RefundConfirmed either way. So: emit REFUND_CONFIRMED in EVERY
-        //      branch — the event means "compensation settled", not "money moved".
-        //      Be able to defend that distinction; it's an interview question wearing a TODO.
-        throw new UnsupportedOperationException("TODO(you): CancelChargeIfStarted — see comment above");
+       // No payload to deserialize — CancelChargeIfStarted is an empty record; the
+       // envelope's sagaId is enough (which answers the record's own TODO).
+       Payment cancelledPayment = paymentRepository.findBySagaId(envelope.sagaId()).orElse(null);
+       if (cancelledPayment != null && cancelledPayment.getStatus() == PaymentStatus.AUTHORIZED) {
+           cancelledPayment.setStatus(PaymentStatus.REFUNDED);
+       }
+
+       // Always emit — the saga parks in COMPENSATING and RefundConfirmed is the only
+       // event that moves it to CANCELLED; the event means "compensation settled",
+       // not "money moved".
+       emitPaymentEvent(EventTypes.REFUND_CONFIRMED, envelope.sagaId(), new RefundConfirmed());
     }
 
     /**
