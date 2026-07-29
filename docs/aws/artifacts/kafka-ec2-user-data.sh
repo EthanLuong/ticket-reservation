@@ -11,7 +11,11 @@ set -euxo pipefail
 dnf install -y docker
 systemctl enable --now docker
 
-PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+# IMDSv2 (default on new launches): metadata needs a session token — a bare GET
+# returns 401, PRIVATE_IP comes back empty, and Kafka silently advertises the
+# container hostname instead. Found the hard way on first deploy (2026-07-29).
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
 mkdir -p /var/lib/kafka-data
 chown 1000:1000 /var/lib/kafka-data
 
