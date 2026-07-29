@@ -5,25 +5,25 @@
   "cpu": "512",
   "memory": "1024",
   "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
-  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ticket-reservation-task-role",
+  "executionRoleArn": "arn:aws:iam::119004747116:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::119004747116:role/ticket-reservation-task-role",
   "containerDefinitions": [
     {
       "name": "app",
-      "image": "<ACCOUNT_ID>.dkr.ecr.us-east-2.amazonaws.com/ticket-reservation:manual-1",
+      "image": "119004747116.dkr.ecr.us-east-2.amazonaws.com/ticket-reservation:manual-1",
       "essential": true,
       "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
       "environment": [
         { "name": "SPRING_PROFILES_ACTIVE", "value": "prod" },
-        { "name": "SPRING_DATASOURCE_URL", "value": "jdbc:postgresql://<RDS_ENDPOINT>:5432/ticketreservation" },
+        { "name": "SPRING_DATASOURCE_URL", "value": "jdbc:postgresql://ticket-reservation-db.czc0aweocw7v.us-east-2.rds.amazonaws.com:5432/ticketreservation" },
         { "name": "SPRING_DATASOURCE_USERNAME", "value": "postgres" },
         { "name": "SPRING_DATA_REDIS_URL", "value": "redis://<ELASTICACHE_ENDPOINT>:6379" },
-        { "name": "SPRING_KAFKA_BOOTSTRAP_SERVERS", "value": "<KAFKA_EC2_PRIVATE_IP>:9092" },
+        { "name": "SPRING_KAFKA_BOOTSTRAP_SERVERS", "value": "10.0.13.180:9092" },
         { "name": "JAVA_TOOL_OPTIONS", "value": "-XX:MaxRAMPercentage=75" }
       ],
       "secrets": [
-        { "name": "SPRING_DATASOURCE_PASSWORD", "valueFrom": "arn:aws:ssm:us-east-2:<ACCOUNT_ID>:parameter/ticketres/prod/db-password" },
-        { "name": "APP_SECURITY_JWT_SECRET", "valueFrom": "arn:aws:ssm:us-east-2:<ACCOUNT_ID>:parameter/ticketres/prod/jwt-secret" }
+        { "name": "SPRING_DATASOURCE_PASSWORD", "valueFrom": "arn:aws:ssm:us-east-2:119004747116:parameter/ticketres/prod/db-password" },
+        { "name": "APP_SECURITY_JWT_SECRET", "valueFrom": "arn:aws:ssm:us-east-2:119004747116:parameter/ticketres/prod/jwt-secret" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
