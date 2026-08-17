@@ -34,3 +34,6 @@ build/
 
 ### Windows / MSYS ###
 *.stackdump
+
+### Local scratch (not part of the project) ###
+Sandbox/

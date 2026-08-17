@@ -23,11 +23,12 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import java.util.List;
 
 @Configuration
-@EnableConfigurationProperties(JwtProperties.class)
+@EnableConfigurationProperties({JwtProperties.class, CorsProperties.class})
 @RequiredArgsConstructor
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final CorsProperties corsProperties;
 
     @Bean
     public PasswordEncoder passwordEncoder() {
@@ -46,11 +47,16 @@ public class SecurityConfig {
         return provider::authenticate;
     }
 
-    /** Dev origin for the Vite frontend (docs/FRONTEND-V1-DESIGN.md). Scoped to /api/**. */
+    /**
+     * Allowed origins come from {@code app.cors.allowed-origins} (env {@code APP_CORS_ALLOWED_ORIGINS},
+     * comma-separated; dev default = the Vite origin). Prod supplies the CloudFront URL via the ECS
+     * task definition — browsers send {@code Origin} on same-origin POSTs, so an incomplete list
+     * 403s signup before any controller runs (2026-08-14 prod incident). Scoped to /api/**.
+     */
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOrigins(List.of("http://localhost:5173"));
+        config.setAllowedOrigins(corsProperties.allowedOrigins());
         config.setAllowedMethods(List.of("GET", "POST", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("Authorization", "Content-Type"));
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
