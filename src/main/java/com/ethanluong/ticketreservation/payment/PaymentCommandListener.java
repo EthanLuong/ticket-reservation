@@ -22,17 +22,8 @@ public class PaymentCommandListener {
     @KafkaListener(topics = KafkaTopics.PAYMENT_CMD, groupId = "payment-service")
     public void onPaymentEvent(String event, Acknowledgment ack) {
 
-        // LLM-added 2026-07-27, poison-pill stopgap: an unparseable message would
-        // otherwise redeliver forever (nothing was processed, so acking loses nothing).
-        // Loud log + ack until the DLT card replaces this with DefaultErrorHandler → payment.cmd.DLT.
         EventEnvelope eventEnvelope;
-        try {
-            eventEnvelope = objectMapper.readValue(event, EventEnvelope.class);
-        } catch (JacksonException e) {
-            log.error("payment.cmd: unparseable message — acked and dropped (DLT card will fix)", e);
-            ack.acknowledge();
-            return;
-        }
+        eventEnvelope = objectMapper.readValue(event, EventEnvelope.class);
 
         paymentService.handleCommand(eventEnvelope);
         ack.acknowledge();
