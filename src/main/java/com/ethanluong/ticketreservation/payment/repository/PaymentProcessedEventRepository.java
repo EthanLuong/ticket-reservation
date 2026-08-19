@@ -1,4 +1,6 @@
-package com.ethanluong.ticketreservation.payment;
+package com.ethanluong.ticketreservation.payment.repository;
+
+import com.ethanluong.ticketreservation.payment.entity.PaymentProcessedEvent;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 

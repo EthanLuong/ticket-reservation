@@ -1,4 +1,6 @@
-package com.ethanluong.ticketreservation.payment;
+package com.ethanluong.ticketreservation.payment.entity;
+
+import com.ethanluong.ticketreservation.payment.type.PaymentStatus;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;

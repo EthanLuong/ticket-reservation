@@ -1,4 +1,4 @@
-package com.ethanluong.ticketreservation.payment;
+package com.ethanluong.ticketreservation.payment.type;
 
 /** Payment row lifecycle. LLM-BUILT 2026-07-27 (skeleton — known ground). */
 public enum PaymentStatus {

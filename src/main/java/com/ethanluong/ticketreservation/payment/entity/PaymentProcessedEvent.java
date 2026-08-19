@@ -1,4 +1,4 @@
-package com.ethanluong.ticketreservation.payment;
+package com.ethanluong.ticketreservation.payment.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
