@@ -1,30 +1,108 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, toastFor } from '../lib/api';
-import { useAuth } from '../auth/AuthContext';
 import { useToast } from '../components/Toast';
+import StatusChip from '../components/StatusChip';
 import { useCountdown } from '../lib/useCountdown';
-import type { ReservationResponse, ReservationStatus } from '../lib/types';
+import type { ReservationResponse } from '../lib/types';
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'medium',
   timeStyle: 'short',
 });
 
-const STATUS_STYLES: Record<ReservationStatus, string> = {
-  HELD: 'border-[var(--accent-border)] bg-[var(--accent-bg)] text-[var(--text-h)]',
-  CONFIRMED: 'border-[var(--border)] bg-[var(--code-bg)] text-[var(--text-h)]',
-  EXPIRED: 'border-[var(--border)] bg-transparent text-[var(--text)] opacity-60',
-  CANCELLED: 'border-[var(--border)] bg-transparent text-[var(--text)] opacity-60 line-through',
-};
+/** Poll cadence while any reservation is unsettled — the saga confirms or cancels server-side. */
+const POLL_MS = 5000;
+
+const isSettled = (r: ReservationResponse) => r.status !== 'HELD';
 
 function Countdown({ expiresAt, onExpire }: { expiresAt: string; onExpire(): void }) {
   const remaining = useCountdown(expiresAt, onExpire);
   return <span className="font-mono">{remaining}</span>;
 }
 
+function ReservationRow({
+  reservation,
+  cancelling,
+  onCancel,
+  onExpire,
+}: {
+  reservation: ReservationResponse;
+  cancelling: boolean;
+  onCancel(id: string): void;
+  onExpire(): void;
+}) {
+  const r = reservation;
+  return (
+    <tr className="border-b border-[var(--border)]">
+      <td className="py-2.5 pr-4 font-mono text-xs text-[var(--text-h)]">#{r.seatId.slice(0, 8)}</td>
+      <td className="py-2.5 pr-4">
+        <StatusChip status={r.status} />
+      </td>
+      <td className="py-2.5 pr-4 text-[var(--text)]">{dateFormatter.format(new Date(r.createdAt))}</td>
+      <td className="py-2.5 pr-4 text-[var(--text)]">
+        {r.status === 'HELD' && r.expiresAt ? (
+          <Countdown expiresAt={r.expiresAt} onExpire={onExpire} />
+        ) : (
+          '—'
+        )}
+      </td>
+      <td className="py-2.5 text-right">
+        {(r.status === 'HELD' || r.status === 'CONFIRMED') && (
+          <button
+            type="button"
+            disabled={cancelling}
+            onClick={() => onCancel(r.id)}
+            className="rounded border border-[var(--border)] px-3 py-1 text-xs hover:border-[var(--accent)] disabled:opacity-50"
+          >
+            {cancelling ? 'Cancelling…' : 'Cancel'}
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function ReservationTable({
+  rows,
+  cancellingId,
+  onCancel,
+  onExpire,
+}: {
+  rows: ReservationResponse[];
+  cancellingId: string | null;
+  onCancel(id: string): void;
+  onExpire(): void;
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-sm">
+        <thead>
+          <tr className="border-b border-[var(--border)] text-left text-[var(--text)]">
+            <th className="py-2 pr-4 font-medium">Seat</th>
+            <th className="py-2 pr-4 font-medium">Status</th>
+            <th className="py-2 pr-4 font-medium">Created</th>
+            <th className="py-2 pr-4 font-medium">Hold expires</th>
+            <th className="py-2"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <ReservationRow
+              key={r.id}
+              reservation={r}
+              cancelling={cancellingId === r.id}
+              onCancel={onCancel}
+              onExpire={onExpire}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function AccountPage() {
-  const { email, logout } = useAuth();
   const { showToast } = useToast();
 
   const [reservations, setReservations] = useState<ReservationResponse[]>([]);
@@ -41,7 +119,7 @@ export default function AccountPage() {
   }, []);
 
   useEffect(() => {
-    document.title = 'Account · Ticket Reservation';
+    document.title = 'My reservations · Ticket Reservation';
   }, []);
 
   const load = useCallback((opts?: { silent?: boolean }) => {
@@ -57,8 +135,7 @@ export default function AccountPage() {
       })
       .catch((err) => {
         if (!mountedRef.current) return;
-        // Background (silent) refetches — e.g. a countdown hitting zero —
-        // fail quietly rather than clobbering a working table with an error.
+        // Background refetches fail quietly rather than clobbering a working table.
         if (!opts?.silent) setError(toastFor(err));
       })
       .finally(() => {
@@ -70,6 +147,46 @@ export default function AccountPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Poll while the tab is visible and any reservation is unsettled — CONFIRMED
+  // and CANCELLED arrive asynchronously from the payment saga, not from user actions.
+  const hasUnsettled = useMemo(() => reservations.some((r) => !isSettled(r)), [reservations]);
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
+
+  useEffect(() => {
+    if (!hasUnsettled) return;
+
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    function start() {
+      if (intervalId !== null) return;
+      intervalId = setInterval(() => loadRef.current({ silent: true }), POLL_MS);
+    }
+    function stop() {
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    }
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') {
+        stop();
+      } else {
+        start();
+        loadRef.current({ silent: true });
+      }
+    }
+
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [hasUnsettled]);
 
   const handleExpire = useCallback(() => {
     load({ silent: true });
@@ -93,23 +210,18 @@ export default function AccountPage() {
     [load, showToast],
   );
 
-  return (
-    <div className="mx-auto mt-16 max-w-3xl px-4 pb-16">
-      <div className="mb-8 flex items-center justify-between">
-        <div>
-          <h1 className="!mb-1">Account</h1>
-          {email && <p className="text-sm text-[var(--text)]">{email}</p>}
-        </div>
-        <button
-          type="button"
-          onClick={logout}
-          className="rounded border border-[var(--border)] px-3 py-1.5 text-sm hover:border-[var(--accent)]"
-        >
-          Log out
-        </button>
-      </div>
+  const active = useMemo(
+    () => reservations.filter((r) => r.status === 'HELD' || r.status === 'CONFIRMED'),
+    [reservations],
+  );
+  const past = useMemo(
+    () => reservations.filter((r) => r.status === 'EXPIRED' || r.status === 'CANCELLED'),
+    [reservations],
+  );
 
-      <h2 className="!text-base">My Reservations</h2>
+  return (
+    <div className="mx-auto mt-8 max-w-3xl px-4 pb-16">
+      <h1 className="!text-3xl">My reservations</h1>
 
       {loading && (
         <div className="flex flex-col gap-3">
@@ -124,7 +236,7 @@ export default function AccountPage() {
 
       {!loading && error && (
         <div className="flex flex-col items-center gap-3 py-12">
-          <p className="text-sm text-red-600">{error}</p>
+          <p className="text-sm text-[var(--danger)]">{error}</p>
           <button
             type="button"
             onClick={() => load()}
@@ -144,58 +256,38 @@ export default function AccountPage() {
         </p>
       )}
 
-      {!loading && !error && reservations.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-[var(--border)] text-left text-[var(--text)]">
-                <th className="py-2 pr-4 font-medium">Seat</th>
-                <th className="py-2 pr-4 font-medium">Status</th>
-                <th className="py-2 pr-4 font-medium">Created</th>
-                <th className="py-2 pr-4 font-medium">Expires</th>
-                <th className="py-2 pr-4 font-medium"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {reservations.map((r) => (
-                <tr key={r.id} className="border-b border-[var(--border)]">
-                  <td className="py-2 pr-4 font-mono text-xs text-[var(--text-h)]">
-                    {r.seatId.slice(0, 8)}
-                  </td>
-                  <td className="py-2 pr-4">
-                    <span
-                      className={`rounded border px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[r.status]}`}
-                    >
-                      {r.status}
-                    </span>
-                  </td>
-                  <td className="py-2 pr-4 text-[var(--text)]">
-                    {dateFormatter.format(new Date(r.createdAt))}
-                  </td>
-                  <td className="py-2 pr-4 text-[var(--text)]">
-                    {r.status === 'HELD' && r.expiresAt ? (
-                      <Countdown expiresAt={r.expiresAt} onExpire={handleExpire} />
-                    ) : (
-                      '—'
-                    )}
-                  </td>
-                  <td className="py-2 pr-4 text-right">
-                    {(r.status === 'HELD' || r.status === 'CONFIRMED') && (
-                      <button
-                        type="button"
-                        disabled={cancellingId === r.id}
-                        onClick={() => handleCancel(r.id)}
-                        className="rounded border border-[var(--border)] px-3 py-1 text-xs hover:border-[var(--accent)] disabled:opacity-50"
-                      >
-                        {cancellingId === r.id ? 'Cancelling…' : 'Cancel'}
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {!loading && !error && active.length > 0 && (
+        <ReservationTable
+          rows={active}
+          cancellingId={cancellingId}
+          onCancel={handleCancel}
+          onExpire={handleExpire}
+        />
+      )}
+
+      {!loading && !error && reservations.length > 0 && active.length === 0 && (
+        <p className="py-6 text-sm text-[var(--text)]">
+          Nothing active.{' '}
+          <Link to="/events" className="text-[var(--accent)] underline">
+            Browse events
+          </Link>
+        </p>
+      )}
+
+      {!loading && !error && past.length > 0 && (
+        <details className="mt-8">
+          <summary className="cursor-pointer text-sm font-medium text-[var(--text)]">
+            Past reservations ({past.length})
+          </summary>
+          <div className="mt-3">
+            <ReservationTable
+              rows={past}
+              cancellingId={cancellingId}
+              onCancel={handleCancel}
+              onExpire={handleExpire}
+            />
+          </div>
+        </details>
       )}
     </div>
   );

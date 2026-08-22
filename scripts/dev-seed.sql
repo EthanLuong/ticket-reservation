@@ -64,3 +64,17 @@ SELECT
     0
 FROM generate_series(1, 12) AS seat_num
 ON CONFLICT (id) DO NOTHING;
+
+-- One deliberately over-limit seat (LLM-added 2026-07-27): reserving VIP-1
+-- exercises the decline → compensation path — MockPaymentGateway declines
+-- amounts > 10_000 cents, so $150.00 fails while every $50 seat succeeds.
+INSERT INTO seats (id, event_id, seat_label, price_cents, status, version)
+VALUES (
+    '111f1111-1111-1111-1111-000000000001',
+    '11111111-1111-1111-1111-111111111111',
+    'VIP-1',
+    15000,
+    'AVAILABLE',
+    0
+)
+ON CONFLICT (id) DO NOTHING;

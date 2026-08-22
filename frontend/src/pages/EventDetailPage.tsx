@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, toastFor } from '../lib/api';
-import type { EventResponse, SeatResponse } from '../lib/types';
+import { ApiError, type EventResponse, type ReservationStatus, type SeatResponse } from '../lib/types';
 import SeatGrid from '../components/SeatGrid';
 import HoldBanner from '../components/HoldBanner';
 import { useToast } from '../components/Toast';
@@ -14,6 +14,7 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 const POLL_MS = 5000;
 
 interface ActiveHold {
+  reservationId: string;
   seatId: string;
   seatLabel: string;
   expiresAt: string;
@@ -32,6 +33,9 @@ export default function EventDetailPage() {
   const [seatsError, setSeatsError] = useState<string | null>(null);
 
   const [hold, setHold] = useState<ActiveHold | null>(null);
+  // The saga settles the reservation server-side (payment confirms or the
+  // timeout compensates) — polled alongside seats so the banner tracks it live.
+  const [holdStatus, setHoldStatus] = useState<ReservationStatus>('HELD');
   const [reserving, setReserving] = useState(false);
 
   const mountedRef = useRef(true);
@@ -106,7 +110,28 @@ export default function EventDetailPage() {
   // Reset any stale hold if the route param changes (component instance is reused).
   useEffect(() => {
     setHold(null);
+    setHoldStatus('HELD');
   }, [id]);
+
+  // While a hold is unsettled, check its reservation on the same cadence as the
+  // seat poll; when the saga settles it, flip the banner and refresh the grid.
+  const checkHold = useCallback(() => {
+    if (!hold || holdStatus !== 'HELD') return;
+    const reservationId = hold.reservationId;
+    api
+      .myReservations()
+      .then((mine) => {
+        if (!mountedRef.current) return;
+        const current = mine.find((r) => r.id === reservationId);
+        if (current && current.status !== 'HELD') {
+          setHoldStatus(current.status);
+          loadSeats({ silent: true });
+        }
+      })
+      .catch(() => {
+        /* background check — retry next tick */
+      });
+  }, [hold, holdStatus, loadSeats]);
 
   useEffect(() => {
     loadEvent();
@@ -124,6 +149,11 @@ export default function EventDetailPage() {
     loadSeatsRef.current = loadSeats;
   }, [loadSeats]);
 
+  const checkHoldRef = useRef(checkHold);
+  useEffect(() => {
+    checkHoldRef.current = checkHold;
+  }, [checkHold]);
+
   useEffect(() => {
     let intervalId: ReturnType<typeof setInterval> | null = null;
 
@@ -131,6 +161,7 @@ export default function EventDetailPage() {
       if (intervalId !== null) return;
       intervalId = setInterval(() => {
         loadSeatsRef.current({ silent: true });
+        checkHoldRef.current();
       }, POLL_MS);
     }
 
@@ -159,23 +190,38 @@ export default function EventDetailPage() {
     };
   }, [id]);
 
+  // One idempotency key per checkout ATTEMPT, keyed by seat. A network failure (no
+  // server answer) keeps the key, so re-clicking that seat retries the SAME logical
+  // action and the backend dedups/replays; any definitive server response concludes
+  // the attempt. An in-flight 409 also keeps it — same attempt, still running.
+  const attemptKeys = useRef<Map<string, string>>(new Map());
+
   const handleSelectSeat = useCallback(
     async (seat: SeatResponse) => {
       setReserving(true);
+      const key = attemptKeys.current.get(seat.id) ?? crypto.randomUUID();
+      attemptKeys.current.set(seat.id, key);
       try {
-        const reservation = await api.reserve(seat.id);
+        const reservation = await api.reserve(seat.id, key);
+        attemptKeys.current.delete(seat.id);
         if (!mountedRef.current) return;
         if (reservation.expiresAt) {
           setHold({
+            reservationId: reservation.id,
             seatId: reservation.seatId,
             seatLabel: seat.seatLabel,
             expiresAt: reservation.expiresAt,
           });
+          setHoldStatus('HELD');
         } else {
           showToast('Seat held — see My Reservations.');
         }
         loadSeats({ silent: true });
       } catch (err) {
+        // A server answer concludes the attempt — except the bare idempotency 409
+        // (in-flight, no problem type), where the same attempt is still running.
+        const inFlight = err instanceof ApiError && err.httpStatus === 409 && !err.problem.type;
+        if (err instanceof ApiError && !inFlight) attemptKeys.current.delete(seat.id);
         if (!mountedRef.current) return;
         showToast(toastFor(err));
         // Grid was stale — refetch immediately so it reflects the contention.
@@ -202,21 +248,21 @@ export default function EventDetailPage() {
 
   if (!id) {
     return (
-      <div className="mx-auto mt-16 max-w-3xl px-4">
+      <div className="mx-auto mt-8 max-w-3xl px-4">
         <p className="text-sm text-[var(--text)]">Invalid event.</p>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto mt-16 max-w-3xl px-4 pb-16">
+    <div className="mx-auto mt-8 max-w-3xl px-4 pb-16">
       {eventLoading && (
         <div className="mb-6 h-20 animate-pulse rounded border border-[var(--border)] bg-[var(--code-bg)]" />
       )}
 
       {!eventLoading && eventError && (
         <div className="flex flex-col items-center gap-3 py-6">
-          <p className="text-sm text-red-600">{eventError}</p>
+          <p className="text-sm text-[var(--danger)]">{eventError}</p>
           <button
             type="button"
             onClick={() => loadEvent()}
@@ -241,7 +287,12 @@ export default function EventDetailPage() {
         <HoldBanner
           seatLabel={hold.seatLabel}
           expiresAt={hold.expiresAt}
+          status={holdStatus}
           onExpire={handleHoldExpire}
+          onDismiss={() => {
+            setHold(null);
+            setHoldStatus('HELD');
+          }}
         />
       )}
 
@@ -258,7 +309,7 @@ export default function EventDetailPage() {
 
       {!seatsLoading && seatsError && (
         <div className="flex flex-col items-center gap-3 py-12">
-          <p className="text-sm text-red-600">{seatsError}</p>
+          <p className="text-sm text-[var(--danger)]">{seatsError}</p>
           <button
             type="button"
             onClick={() => loadSeats()}

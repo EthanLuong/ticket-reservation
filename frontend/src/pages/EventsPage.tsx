@@ -60,7 +60,7 @@ export default function EventsPage() {
   }, [events, query]);
 
   return (
-    <div className="mx-auto mt-16 max-w-3xl px-4">
+    <div className="mx-auto mt-8 max-w-3xl px-4 pb-16">
       <h1>Events</h1>
 
       <input
@@ -84,7 +84,7 @@ export default function EventsPage() {
 
       {!loading && error && (
         <div className="flex flex-col items-center gap-3 py-12">
-          <p className="text-sm text-red-600">{error}</p>
+          <p className="text-sm text-[var(--danger)]">{error}</p>
           <button
             type="button"
             onClick={() => load()}

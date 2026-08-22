@@ -33,6 +33,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export function toastFor(e: unknown): string {
   if (!(e instanceof ApiError)) return 'Something went wrong.';
   const t = e.problem.type ?? '';
+  // Idempotency in-flight 409 carries no ProblemDetail body (bare 409 + Retry-After),
+  // unlike seat-contention which has a typed problem — that absence is the discriminator.
+  if (e.httpStatus === 409 && !t) return 'Still finishing your previous attempt — give it a second.';
   if (t.endsWith('seat-contention')) return 'Someone beat you to that seat — pick another.';
   if (t.endsWith('seat-not-available')) return 'That seat was just taken.';
   if (t.endsWith('seat-operation-failed')) return e.problem.detail ?? 'That reservation can no longer be changed.';
@@ -50,7 +53,10 @@ export const api = {
   event: (id: string) => request<EventResponse>(`/api/events/${id}`),
   seats: (eventId: string, status?: SeatStatus) =>
     request<SeatResponse[]>(`/api/seats?eventId=${eventId}${status ? `&status=${status}` : ''}`),
-  reserve: (seatId: string) => request<ReservationResponse>('/api/reservations', { method: 'POST', body: JSON.stringify({ seatId }) }),
+  // Idempotency-Key is REQUIRED by the backend (400 without it): one key per checkout
+  // attempt, minted by the caller so retries of the same attempt reuse it.
+  reserve: (seatId: string, idempotencyKey: string) =>
+    request<ReservationResponse>('/api/reservations', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ seatId }) }),
   cancel: (reservationId: string) => request<ReservationResponse>(`/api/reservations/${reservationId}`, { method: 'DELETE' }),
   myReservations: () => request<ReservationResponse[]>('/api/reservations/me'),
 };
