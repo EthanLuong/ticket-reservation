@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-07-26
 **Phase:** 2a
+**Sibling:** [ADR 0007](0007-saga-messaging-outbox-orchestration-dlt.md) (outbox, orchestration, ordering, DLT for the same topics)
 **Supersedes:** the flat per-record contracts committed with the orchestrator skeleton (each record carried its own eventId/sagaId/occurredAt; no type discriminator existed)
 
 ## Context

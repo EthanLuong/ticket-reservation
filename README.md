@@ -9,6 +9,8 @@ A Spring Boot event ticketing service handling concurrent seat reservations with
 
 ## Status
 
+**Phase 2a (payment saga over Kafka) — feature-complete on `phase-2a-payment-saga`.** Orchestrated booking saga (reserve → charge → confirm/compensate) via transactional outbox, idempotent consumers, DLT poison-pill handling, and an `Idempotency-Key` contract on the reserve endpoint. Design records: [ADR 0003](docs/adr/0003-event-typing.md) (wire format), [ADR 0007](docs/adr/0007-saga-messaging-outbox-orchestration-dlt.md) (outbox/orchestration/ordering/DLT), [ADR 0008](docs/adr/0008-deliberately-not-transactional.md) (deliberate non-transactionality).
+
 **Phase 1 (Redis holds + distributed lock) — SHIPPED.** Reservation TTL is now Redis-native (atomic `SET NX EX`), critical sections are wrapped in a Redisson `RLock` for cross-JVM serialization, and the `@Scheduled` Postgres sweeper has been retired in favor of two-path lazy reconciliation. Failure-closed (503) on Redis outage — see [`docs/adr/0002-redis-for-holds-and-locks.md`](docs/adr/0002-redis-for-holds-and-locks.md) for the design decisions.
 
 **Phase 0 (reservation foundation) — SHIPPED.** Single-service reservation system with JWT auth, optimistic-locked seat holds, and Testcontainers-proven race invariants. Deployed on Railway with managed Postgres.
@@ -125,6 +127,26 @@ Cancellation mirrors the structure: lock → tx (set CANCELLED, free seat) → D
 
 `myReservations()` lazily reconciles HELD-with-no-Redis-key rows to EXPIRED on read — replaces the retired `@Scheduled` sweeper.
 
+### Saga flow (Phase 2a)
+
+Reserving now also starts a booking saga: the reservation transaction writes a `Saga` row and a `ChargeCard` command into the **transactional outbox** (same Postgres commit — no dual-write window); a relay publishes outbox rows to Kafka; the payment component charges and replies; the orchestrator drives the state machine to a terminal state.
+
+```mermaid
+stateDiagram-v2
+    [*] --> STARTED : reserve() — outbox ChargeCard
+    STARTED --> AWAITING_PAYMENT
+    AWAITING_PAYMENT --> COMPLETED : PaymentConfirmed — reservation CONFIRMED
+    AWAITING_PAYMENT --> COMPENSATING : PaymentFailed
+    AWAITING_PAYMENT --> COMPENSATING : 30s timeout (sweeper) — outbox CancelChargeIfStarted
+    COMPENSATING --> CANCELLED : RefundConfirmed / nothing to refund — reservation CANCELLED
+    COMPLETED --> [*]
+    CANCELLED --> [*]
+```
+
+Messages ride a generic envelope keyed by `sagaId` (per-saga total order — [ADR 0003](docs/adr/0003-event-typing.md)); delivery is **at-least-once + idempotent consumers** (dedup on `eventId`), never a claimed "exactly-once"; unprocessable records go to `<topic>.DLT` after 3 attempts ([ADR 0007](docs/adr/0007-saga-messaging-outbox-orchestration-dlt.md)).
+
+**Idempotency is layered — three nets, different failure modes:** the REST `Idempotency-Key` (required on `POST /api/reservations`) dedups client retries and replays the original response; each Kafka consumer's `processed_events` table dedups redelivered messages; the Redis seat hold blocks a second hold on the same seat. Any one alone leaves a gap the others close.
+
 ---
 
 ## API reference
@@ -155,7 +177,7 @@ All endpoints are JSON. Protected endpoints require `Authorization: Bearer <toke
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/reservations` | Hold a seat (body: `{"seatId":"<uuid>"}`) |
+| `POST` | `/api/reservations` | Hold a seat (body: `{"seatId":"<uuid>"}`). **Requires `Idempotency-Key` header** (client-minted UUID per checkout attempt, reused across retries of it); returns `201`. Duplicate in flight → `409` + `Retry-After`; completed duplicate → original response replayed verbatim; key reuse with different body → `422` |
 | `DELETE` | `/api/reservations/{id}` | Cancel own reservation, release seat |
 | `GET` | `/api/reservations/me` | List caller's reservations |
 
@@ -181,10 +203,12 @@ TOKEN=$(curl -s -X POST $BASE/api/auth/register \
 EVENT_ID=$(curl -s $BASE/api/events | jq -r '.content[0].id')
 SEAT_ID=$(curl -s "$BASE/api/seats?eventId=$EVENT_ID&status=AVAILABLE" | jq -r '.[0].id')
 
-# 3. Reserve
+# 3. Reserve (Idempotency-Key is required — mint one per checkout attempt,
+#    reuse it when retrying the SAME attempt: the retry replays, never double-books)
 curl -X POST $BASE/api/reservations \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d "{\"seatId\":\"$SEAT_ID\"}"
 ```
 
@@ -196,6 +220,8 @@ Error responses follow [RFC 7807](https://www.rfc-editor.org/rfc/rfc7807) (`appl
 | `409` | `seat-contention` | Another reserve/cancel for this seat is in flight (Redisson lock contention) | **Auto-retry** — `retryable: true` flag set |
 | `409` | `optimistic-lock` | DB-level `@Version` race lost (rare under Phase 1's lock + TTL) | Refresh state, retry |
 | `503` | `redis-unavailable` | Redis is unreachable — coordination layer is down | Retry after `retryAfterSeconds` (5s) |
+| `409` | *(no problem body)* | Same `Idempotency-Key` still in flight — the bare body is the discriminator vs the typed 409s above | Retry after `Retry-After` (2s) with the **same** key |
+| `422` | *(no problem body)* | `Idempotency-Key` reused with a different request body | Client bug — mint a fresh key |
 
 Example for the double-book attempt:
 
@@ -225,6 +251,8 @@ Example for Redis outage:
 ---
 
 ## Design decisions
+
+Phase 2a's decisions are recorded as ADRs rather than repeated here: [0003 event typing](docs/adr/0003-event-typing.md) · [0007 outbox / orchestration / ordering / DLT](docs/adr/0007-saga-messaging-outbox-orchestration-dlt.md) · [0008 deliberately not transactional](docs/adr/0008-deliberately-not-transactional.md). The numbered items below are Phase 0/1.
 
 ### 1. Three-layer concurrency defense (not one)
 
