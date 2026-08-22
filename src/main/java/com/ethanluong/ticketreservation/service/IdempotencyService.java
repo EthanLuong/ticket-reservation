@@ -1,12 +1,28 @@
 package com.ethanluong.ticketreservation.service;
 
+import com.ethanluong.ticketreservation.domain.entity.IdempotencyRecord;
 import com.ethanluong.ticketreservation.domain.repository.IdempotencyRecordRepository;
+import com.ethanluong.ticketreservation.domain.type.IdempotencyStatus;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import tools.jackson.databind.ObjectMapper;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.UUID;
 import java.util.function.Supplier;
+
+import static com.ethanluong.ticketreservation.domain.type.IdempotencyStatus.COMPLETED;
+import static com.ethanluong.ticketreservation.domain.type.IdempotencyStatus.FAILED;
+import static com.ethanluong.ticketreservation.domain.type.IdempotencyStatus.IN_PROGRESS;
 
 /**
  * SKELETON — structure only, on purpose (current-task card, Step 2: the transaction
@@ -23,8 +39,10 @@ import java.util.function.Supplier;
 public class IdempotencyService {
 
     private final IdempotencyRecordRepository records;
-    // TODO(you): response serialization — this codebase is Jackson 3, raw-String
-    //   boundary country: per-class `new ObjectMapper()` (fasterxml), never injected.
+    private final TransactionTemplate transactionTemplate;
+    // Injected tools.jackson ObjectMapper — same convention as SagaOrchestrator/PaymentService
+    // (the old skeleton TODO claimed per-class fasterxml mappers; the codebase says otherwise).
+    private final ObjectMapper objectMapper;
 
     /**
      * At-most-one execution per (userId, endpoint, key); duplicates get the card's
@@ -33,30 +51,83 @@ public class IdempotencyService {
      */
     public ResponseEntity<String> execute(UUID userId, String endpoint, String idempotencyKey,
                                           String requestHash, Supplier<ResponseEntity<?>> handler) {
-        // TODO(you) Step A — claim: INSERT an IN_PROGRESS record.
-        //   Card hint: which propagation makes the claim visible to concurrent duplicates
-        //   BEFORE the business transaction commits, and why does @Transactional on this
-        //   method (default propagation) get that wrong? (Your July suspended-lock lesson,
-        //   in reverse.)
+        IdempotencyRecord returnRecord = null;
 
-        // TODO(you) Step B — lost the race: catch DataIntegrityViolationException, load the
-        //   existing record, and branch: IN_PROGRESS → 409 / hash mismatch → 422 /
-        //   COMPLETED → replay / FAILED → fall through to Step C. Decide the order these
-        //   checks run in and defend it (hash check before or after state check?).
+        try{
+             returnRecord = transactionTemplate.execute(status -> {
+                var record = IdempotencyRecord.builder()
+                        .userId(userId)
+                        .endpoint(endpoint)
+                        .idempotencyKey(idempotencyKey)
+                        .requestHash(requestHash)
+                        .status(IN_PROGRESS).build();
 
-        // TODO(you) Step C — execute: run handler.get() (the real reserve(), its own tx).
+                records.save(record);
+                records.flush();
+                return record;
+            });
+        } catch (DataIntegrityViolationException e) {
+            var existingRecord = records.findByUserIdAndEndpointAndIdempotencyKey(userId, endpoint, idempotencyKey).orElseThrow();
+            var recordStatus =  existingRecord.getStatus();
 
-        // TODO(you) Step D — capture: on success, serialize the body and mark the record
-        //   COMPLETED + responseStatus + responseBody. Same propagation question as Step A —
-        //   what happens to this update if a LATER failure unwinds the calling thread?
+            if(!existingRecord.getRequestHash().equals(requestHash)){
+                return ResponseEntity.status(422).build();
+            }
 
-        // TODO(you) Step E — failure path: on exception, mark FAILED (or delete) so a retry
-        //   can execute, then rethrow. Card warning: don't cache 5xx outcomes you WANT
-        //   retried; decide what a replayed 4xx business rejection should look like.
+            switch (recordStatus){
+                case IN_PROGRESS -> {return  ResponseEntity.status(409).header(HttpHeaders.RETRY_AFTER, "2").build();}
+                case COMPLETED -> {return ResponseEntity
+                                .status(existingRecord.getResponseStatus())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .body(existingRecord.getResponseBody());}
+                case FAILED -> {
+                    if (records.compareAndSetStatus(existingRecord.getId(), FAILED, IN_PROGRESS) == 0) {
+                        return ResponseEntity.status(409).header(HttpHeaders.RETRY_AFTER, "2").build();
+                    }
+                    returnRecord = existingRecord;
+                }
+            }
+        }
 
-        throw new UnsupportedOperationException("card Step 2 — not implemented yet");
+        ResponseEntity<?> response;
+        try{
+            response = handler.get();
+        } catch (Exception e){
+            returnRecord.setStatus(FAILED);
+            records.save(returnRecord);
+            throw(e);
+        }
+
+        String body;
+        try {
+            body = objectMapper.writeValueAsString(response.getBody());
+        } catch (RuntimeException e) {
+            returnRecord.setStatus(FAILED);
+            records.save(returnRecord);
+            throw e;
+        }
+
+        returnRecord.setStatus(COMPLETED);
+        returnRecord.setResponseStatus(response.getStatusCode().value());
+        returnRecord.setResponseBody(body);
+        records.save(returnRecord);
+
+        return ResponseEntity.status(response.getStatusCode())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
-    // TODO(you): static sha256(String canonicalBody) helper (or put hashing in the
-    //   controller — decide which layer owns "canonical request body" and why).
+    /**
+     * Canonical-body hash for the claim (Claude, boilerplate by agreement): 64 hex chars,
+     * sized to the request_hash column. Lives here, not the controller — callers shouldn't
+     * know which algorithm the idempotency layer keys on.
+     */
+    public static String sha256(String canonicalBody) {
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(canonicalBody.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is JVM-mandated; its absence is a broken runtime", e);
+        }
+    }
 }
