@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, toastFor } from '../lib/api';
-import type { EventResponse, ReservationStatus, SeatResponse } from '../lib/types';
+import { ApiError, type EventResponse, type ReservationStatus, type SeatResponse } from '../lib/types';
 import SeatGrid from '../components/SeatGrid';
 import HoldBanner from '../components/HoldBanner';
 import { useToast } from '../components/Toast';
@@ -190,11 +190,20 @@ export default function EventDetailPage() {
     };
   }, [id]);
 
+  // One idempotency key per checkout ATTEMPT, keyed by seat. A network failure (no
+  // server answer) keeps the key, so re-clicking that seat retries the SAME logical
+  // action and the backend dedups/replays; any definitive server response concludes
+  // the attempt. An in-flight 409 also keeps it — same attempt, still running.
+  const attemptKeys = useRef<Map<string, string>>(new Map());
+
   const handleSelectSeat = useCallback(
     async (seat: SeatResponse) => {
       setReserving(true);
+      const key = attemptKeys.current.get(seat.id) ?? crypto.randomUUID();
+      attemptKeys.current.set(seat.id, key);
       try {
-        const reservation = await api.reserve(seat.id);
+        const reservation = await api.reserve(seat.id, key);
+        attemptKeys.current.delete(seat.id);
         if (!mountedRef.current) return;
         if (reservation.expiresAt) {
           setHold({
@@ -209,6 +218,10 @@ export default function EventDetailPage() {
         }
         loadSeats({ silent: true });
       } catch (err) {
+        // A server answer concludes the attempt — except the bare idempotency 409
+        // (in-flight, no problem type), where the same attempt is still running.
+        const inFlight = err instanceof ApiError && err.httpStatus === 409 && !err.problem.type;
+        if (err instanceof ApiError && !inFlight) attemptKeys.current.delete(seat.id);
         if (!mountedRef.current) return;
         showToast(toastFor(err));
         // Grid was stale — refetch immediately so it reflects the contention.
