@@ -51,49 +51,51 @@ The `test-run` goal auto-wires a disposable Postgres container via `@ServiceConn
 
 ## Architecture
 
-Single service, two backing stores (Postgres for system of record, Redis for ephemeral coordination). Phase 1 introduces Redis specifically for cross-JVM coordination — Phase 0's `@Version` + partial unique index remain as the DB-level correctness backstop.
+One deployable today, two backing stores (Postgres = system of record, Redis = ephemeral coordination), Kafka carrying the payment saga between the reservation side and the payment component. The component boundary is already event-only — the [refocus design](docs/REFOCUS-DESIGN.md) splits it into a real second service.
 
+```mermaid
+flowchart LR
+    client([Browser SPA / curl])
+    subgraph app["Spring Boot app (one JAR)"]
+        sec[JWT filter chain] --> rest[REST controllers]
+        rest --> svc["services<br/>(TransactionTemplate)"]
+        svc --> repo[JPA repositories]
+        svc --> hold["ReservationHoldStore<br/>SET NX EX + Redisson RLock"]
+        svc --> saga[SagaOrchestrator<br/>+ 30s timeout sweeper]
+        saga --> obx[outbox relay]
+        paycmp["payment component<br/>MockPaymentGateway"]
+    end
+    client -->|HTTPS + Bearer JWT| sec
+    repo --> pg[("PostgreSQL 17<br/>Flyway · partial unique index<br/>@Version backstop")]
+    hold --> redis[("Redis 7<br/>hold:seat:* TTL · lock:seat:*<br/>coordination only")]
+    obx -->|payment.cmd| kafka[["Kafka (KRaft)<br/>3 partitions · key=sagaId"]]
+    kafka -->|payment.evt| saga
+    kafka --> paycmp
+    paycmp --> kafka
 ```
-                    ┌────────────────────────────┐
-                    │  Client (curl / Postman)   │
-                    └──────────────┬─────────────┘
-                                   │ HTTPS + Bearer JWT
-                                   ▼
-     ┌─────────────────────────────────────────────────────────┐
-     │                   Spring Boot App                       │
-     │                                                         │
-     │  ┌──────────────┐   ┌────────────────┐  ┌────────────┐  │
-     │  │  Controllers │──▶│   Services     │─▶│  Repos     │──┼──▶ Postgres
-     │  │  (REST)      │   │  (Tx Template) │  │  (JPA)     │  │
-     │  └──────────────┘   └────────┬───────┘  └────────────┘  │
-     │                              │                          │
-     │  ┌──────────────────┐        │                          │
-     │  │  Security Filter │        │                          │
-     │  │  Chain (JWT)     │        │                          │
-     │  └──────────────────┘        ▼                          │
-     │                     ┌──────────────────┐                │
-     │                     │ ReservationHold- │                │
-     │                     │ Store            │────────────────┼──▶ Redis
-     │                     │  - SET NX EX     │   Lettuce      │
-     │                     │    (TTL hold)    │   (Spring Data)│
-     │                     │  - Redisson      │                │
-     │                     │    RLock         │   Redisson     │
-     │                     │    (crit. sec.)  │                │
-     │                     │  - hasHold (read)│                │
-     │                     └──────────────────┘                │
-     └─────────────────────────────────────────────────────────┘
-                  │                              │
-                  ▼                              ▼
-   ┌──────────────────────────────┐   ┌──────────────────────────────┐
-   │   PostgreSQL 17              │   │   Redis 7                    │
-   │   - Flyway migrations        │   │   - hold:seat:{id} (TTL key) │
-   │   - Partial unique index     │   │   - lock:seat:{id} (RLock)   │
-   │     backstop                 │   │   - Upstash in prod          │
-   │   - @Version optimistic col  │   │                              │
-   │   - System of record         │   │   Coordination only —        │
-   │                              │   │   no durable user state      │
-   └──────────────────────────────┘   └──────────────────────────────┘
+
+### Where this is going — refocus target ([design](docs/REFOCUS-DESIGN.md))
+
+```mermaid
+flowchart LR
+    client([Browser SPA])
+    subgraph rsvc[reservation-service]
+        api[REST + JWT + saga orchestrator + outbox]
+    end
+    subgraph psvc[payment-service]
+        pay[payment.cmd listener + gateway + outbox]
+    end
+    client --> rsvc
+    rsvc --> rdb[(reservation DB)]
+    rsvc --> redis2[(Redis)]
+    psvc --> pdb[(payments DB)]
+    rsvc <-->|payment.cmd / payment.evt<br/>ONLY channel| kafka2[[Kafka]]
+    psvc <--> kafka2
+    rsvc -.->|JSON logs, sagaId correlation| elk[Filebeat → Logstash → Elasticsearch → Kibana]
+    psvc -.-> elk
 ```
+
+Two services sharing nothing but Kafka topics and the event contract; each owns its database, dedup table, and outbox; one `sagaId` traces a booking across both in Kibana.
 
 ### Domain
 
@@ -370,7 +372,7 @@ Run the full suite (17 tests across 6 classes):
 - **Security:** Spring Security 6, jjwt 0.12.x
 - **Testing:** JUnit 5, AssertJ, Testcontainers, `@MockitoBean` for failure injection
 - **Packaging:** Multi-stage Dockerfile (Java 21 JDK builder → JRE-alpine runtime)
-- **Deploy:** Railway (managed Postgres + container) + Upstash (managed Redis)
+- **Deploy:** AWS — ECS Fargate behind ALB, RDS Postgres, ElastiCache Redis, self-managed Kafka (KRaft) on EC2, CloudFront two-origin (see `docs/aws/DEPLOY-HANDBOOK.md`)
 - **Build:** Maven (via `mvnw`)
 
 ---
@@ -379,12 +381,15 @@ Run the full suite (17 tests across 6 classes):
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0. Reservation foundation** | Entities, JWT auth, `@Version` optimistic lock, TTL sweeper, Testcontainers race proof, Railway deploy | ✅ Shipped |
-| **1. Redis holds + distributed lock** | Redis-native TTL holds, Redisson `RLock` per seat, sweeper retired, lazy reconciliation, fail-closed (503) on Redis outage | ✅ Shipped |
-| **2. Payment + saga** | Extract payment service; Kafka between services; outbox; saga orchestration with timeout compensation | Planned |
-| **3. Frontend** | Next.js 14 browse + seat-map booking flow | Planned |
-| **4. Scale signals** | Rate limiting (Bucket4j), Resilience4j circuit breakers, Grafana dashboards, hot-event caching | Planned |
-| **5. Tickets + polish** | Ticket issuance service, QR validation, refund flow, group bookings | Planned |
+| **0. Reservation foundation** | Entities, JWT auth, `@Version` optimistic lock, partial-index backstop, Testcontainers race proof | ✅ Shipped |
+| **1. Redis holds + distributed lock** | Redis-native TTL holds, Redisson `RLock` per seat, lazy reconciliation, fail-closed (503) on Redis outage | ✅ Shipped |
+| **2a. Payment saga over Kafka** | Transactional outbox → topics → idempotent consumers → DLT; orchestrated state machine + timeout compensation; REST `Idempotency-Key` | ✅ Shipped (merged 2026-08-21) |
+| **Frontend** | React 19 SPA: auth, events, seat grid with live hold countdown + saga status | ✅ Shipped |
+| **AWS deploy** | VPC, ECS Fargate ×2, RDS, ElastiCache, KRaft on EC2, SSM secrets, CloudFront | ✅ Live |
+| **R1–R2. Microservice split** | Own the container stack; extract `payment-service` (own DB, own outbox) — [refocus design](docs/REFOCUS-DESIGN.md) | ▶ Active |
+| **R3. ELK logging** | JSON logs + `sagaId` correlation → Filebeat → Logstash → Elasticsearch → Kibana | Planned |
+| **R4. Surface** | Target-architecture README, AWS redeploy of the two-service shape, CI/CD | Planned |
+| **Parked** | Rate limiting, circuit breaker, caching, tickets/QR, refunds, group bookings, load tests | Backlog |
 
 Each phase ships polished — deployed, tested, documented. At any checkpoint there is an interview-ready artifact.
 
@@ -399,21 +404,11 @@ Required at runtime:
 | `SPRING_DATASOURCE_URL` | JDBC URL — must start with `jdbc:postgresql://` |
 | `SPRING_DATASOURCE_USERNAME` | DB user |
 | `SPRING_DATASOURCE_PASSWORD` | DB password |
-| `SPRING_DATA_REDIS_URL` | Redis connection — `redis://host:port` for plaintext, `rediss://host:port` for TLS (Upstash). Defaults to `redis://localhost:6379` for local dev. |
+| `SPRING_DATA_REDIS_URL` | Redis connection — `redis://host:port` for plaintext, `rediss://host:port` for TLS (prod ElastiCache with transit encryption). Defaults to `redis://localhost:6379` for local dev. |
 | `APP_SECURITY_JWT_SECRET` | HS256 signing key, ≥32 bytes |
 | `SERVER_PORT` | On Railway/Fly, bind to `${PORT}` |
 
 Local dev via `docker compose up` supplies all of these with sane defaults. A dev JWT secret is baked into `application.properties` — **never use it in production**.
-
-### Upstash Redis setup (production)
-
-1. Create a free-tier Redis database at [upstash.com](https://upstash.com).
-2. Copy the connection URL — it begins with `rediss://` (note the second `s` for TLS).
-3. Set on Railway: `SPRING_DATA_REDIS_URL=rediss://<host>:<port>` with the password embedded in the URL (`rediss://default:<password>@<host>:<port>`).
-4. Verify in `/actuator/health` — Redis component should report `UP`.
-5. Smoke test: POST a reservation, wait > 10 minutes, GET `/api/reservations/me` — the row should now be `EXPIRED` and the seat re-reservable. Validates Redis-native TTL + lazy reconciliation in production.
-
----
 
 ## Frontend
 
