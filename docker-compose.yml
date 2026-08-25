@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: ticketreservation
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
@@ -32,9 +32,9 @@ services:
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/ticketreservation
       SPRING_DATASOURCE_USERNAME: postgres
-      SPRING_DATASOURCE_PASSWORD: password
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD}
       SPRING_DATA_REDIS_URL: redis://redis:6379
-      APP_SECURITY_JWT_SECRET: ${APP_SECURITY_JWT_SECRET:-dev-only-secret-change-me-0123456789abcdef0123456789abcdef}
+      APP_SECURITY_JWT_SECRET: ${APP_SECURITY_JWT_SECRET:?err}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: broker:29092
     depends_on:
       broker:
