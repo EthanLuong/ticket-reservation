@@ -41,8 +41,8 @@ If Redis is unreachable, reservation endpoints return 503 with a retryable `Prob
 Requires Docker Desktop running (for the Testcontainers-backed dev Postgres).
 
 ```bash
-./mvnw spring-boot:test-run    # dev run, auto-provisions Testcontainers Postgres
-./mvnw verify                  # full test suite + package
+./reservation-service/mvnw spring-boot:test-run    # dev run, auto-provisions Testcontainers Postgres
+./reservation-service/mvnw verify                  # full test suite + package
 ```
 
 The `test-run` goal auto-wires a disposable Postgres container via `@ServiceConnection`, so no manual DB setup is needed.
@@ -104,7 +104,7 @@ Event  1───N  Seat  1───N  Reservation  N───1  User
                                 status ∈ {HELD, CONFIRMED, EXPIRED, CANCELLED}
 ```
 
-Full schema: [`src/main/resources/db/migration/V1__init.sql`](src/main/resources/db/migration/V1__init.sql).
+Full schema: [`reservation-service/src/main/resources/db/migration/V1__init.sql`](reservation-service/src/main/resources/db/migration/V1__init.sql).
 
 ### Reservation flow (Phase 1)
 
@@ -332,7 +332,7 @@ Drops `@GeneratedValue` (so Hibernate doesn't classify pre-set ids as detached) 
 
 ### Concurrency invariant — the headline test
 
-[`SeatReservationConcurrencyIT`](src/test/java/com/ethanluong/ticketreservation/SeatReservationConcurrencyIT.java) races 10 threads at the same seat through a `CountDownLatch` start-gate, then asserts:
+[`SeatReservationConcurrencyIT`](reservation-service/src/test/java/com/ethanluong/ticketreservation/SeatReservationConcurrencyIT.java) races 10 threads at the same seat through a `CountDownLatch` start-gate, then asserts:
 
 - Exactly one `Outcome.SUCCESS`
 - Zero `Outcome.FAILURE_OTHER` (unexpected errors)
@@ -345,9 +345,9 @@ Categorized outcomes distinguish app-layer losses (`FAILURE_NOT_AVAILABLE`) from
 
 | Test class | What it verifies |
 |---|---|
-| [`RedisTTLHoldIT`](src/test/java/com/ethanluong/ticketreservation/RedisTTLHoldIT.java) | `reserve()` writes `hold:seat:{id}` with TTL ≈ 600s; collision blocks second reserve; `cancel()` releases the key; on-the-fly + lazy reconciliation paths |
-| [`RedissonLockContentionIT`](src/test/java/com/ethanluong/ticketreservation/RedissonLockContentionIT.java) | `reserve()` fast-fails with `SeatContentionException` (<500ms) when the `RLock` is held on a different thread; succeeds normally once released |
-| [`RedisOutageIT`](src/test/java/com/ethanluong/ticketreservation/RedisOutageIT.java) | `@MockitoBean RedissonClient` injects connection failure; asserts exception bubbles to handler, zero DB drift, 503 ProblemDetail mapping |
+| [`RedisTTLHoldIT`](reservation-service/src/test/java/com/ethanluong/ticketreservation/RedisTTLHoldIT.java) | `reserve()` writes `hold:seat:{id}` with TTL ≈ 600s; collision blocks second reserve; `cancel()` releases the key; on-the-fly + lazy reconciliation paths |
+| [`RedissonLockContentionIT`](reservation-service/src/test/java/com/ethanluong/ticketreservation/RedissonLockContentionIT.java) | `reserve()` fast-fails with `SeatContentionException` (<500ms) when the `RLock` is held on a different thread; succeeds normally once released |
+| [`RedisOutageIT`](reservation-service/src/test/java/com/ethanluong/ticketreservation/RedisOutageIT.java) | `@MockitoBean RedissonClient` injects connection failure; asserts exception bubbles to handler, zero DB drift, 503 ProblemDetail mapping |
 
 ### Stack
 
@@ -359,7 +359,7 @@ Categorized outcomes distinguish app-layer losses (`FAILURE_NOT_AVAILABLE`) from
 Run the full suite (17 tests across 6 classes):
 
 ```bash
-./mvnw verify
+./reservation-service/mvnw verify
 ```
 
 ---
@@ -432,7 +432,7 @@ A React 19 + TypeScript + Tailwind v4 SPA lives in `frontend/` — login/registe
 
    Safe to re-run — every row uses a fixed UUID + `ON CONFLICT (id) DO NOTHING`.
 
-   *(Alternative to step 1+2: `./mvnw spring-boot:run` against a Postgres/Redis you already have running, then apply the seed the same way.)*
+   *(Alternative to step 1+2: `./reservation-service/mvnw spring-boot:run` against a Postgres/Redis you already have running, then apply the seed the same way.)*
 
 3. **Frontend dev server:**
 
