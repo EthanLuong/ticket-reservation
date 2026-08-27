@@ -8,7 +8,7 @@
 -- Usage (see README.md "Frontend" section for the full docker compose command):
 --   docker compose exec -T db psql -U postgres -d ticketreservation < scripts/dev-seed.sql
 --
--- Schema reference: src/main/resources/db/migration/V1__init.sql
+-- Schema reference: reservation-service/src/main/resources/db/migration/V1__init.sql
 
 -- 2 events: one ~30 days out, one ~45 days out (relative to whenever this
 -- script runs, so seed data never looks stale in a demo).

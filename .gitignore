@@ -37,3 +37,6 @@ build/
 
 ### Local scratch (not part of the project) ###
 Sandbox/
+
+### Environment Variables ###
+.env
