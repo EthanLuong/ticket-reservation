@@ -116,6 +116,23 @@ class PaymentRoundTripIT {
     }
 
     @Test
+    @DisplayName("CancelChargeIfStarted after an authorized charge → RefundConfirmed on payment.evt + REFUNDED row")
+    void cancelAfterCharge_refundsOnTheWire() throws Exception {
+        UUID sagaId = UUID.randomUUID();
+        sendChargeCard(sagaId, 5_000);
+        assertThat(awaitEvtFor(sagaId).eventType()).isEqualTo(EventTypes.PAYMENT_CONFIRMED);
+
+        EventEnvelope cancel = new EventEnvelope(UUID.randomUUID(), EventTypes.CANCEL_CHARGE_IF_STARTED, 1,
+                OffsetDateTime.now(clock), sagaId, objectMapper.createObjectNode());
+        kafkaTemplate.send(KafkaTopics.PAYMENT_CMD, sagaId.toString(), objectMapper.writeValueAsString(cancel))
+                .get(10, TimeUnit.SECONDS);
+
+        assertThat(awaitEvtFor(sagaId).eventType()).isEqualTo(EventTypes.REFUND_CONFIRMED);
+        assertThat(paymentRepository.findBySagaId(sagaId).orElseThrow().getStatus())
+                .isEqualTo(PaymentStatus.REFUNDED);
+    }
+
+    @Test
     @DisplayName("ChargeCard over the limit → PaymentFailed on payment.evt + FAILED row")
     void chargeCard_declined_roundTrip() throws Exception {
         UUID sagaId = UUID.randomUUID();
