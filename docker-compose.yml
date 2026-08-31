@@ -48,6 +48,27 @@ services:
       redis:
         condition: service_healthy
 
+  # Like app: no restart policy (a crashing service should stay dead and visible
+  # in dev — 8f6df36), no ports (nothing on the host needs it; actuator stays
+  # network-internal, the healthcheck runs inside the container).
+  payment:
+    build: ./payment-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/payments
+      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?err}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: broker:29092
+    depends_on:
+      broker:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8081/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   broker:
     image: apache/kafka:4.0.0
     container_name: broker
