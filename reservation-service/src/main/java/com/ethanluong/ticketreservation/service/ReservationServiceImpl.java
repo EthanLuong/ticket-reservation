@@ -2,6 +2,7 @@ package com.ethanluong.ticketreservation.service;
 
 import com.ethanluong.ticketreservation.api.exception.CancellationWindowClosedException;
 import com.ethanluong.ticketreservation.api.exception.ResourceNotFoundException;
+import com.ethanluong.ticketreservation.api.exception.SeatContentionException;
 import com.ethanluong.ticketreservation.api.exception.SeatNotAvailableException;
 import com.ethanluong.ticketreservation.api.exception.SeatOperationException;
 import com.ethanluong.ticketreservation.domain.entity.Reservation;
@@ -12,6 +13,7 @@ import com.ethanluong.ticketreservation.domain.type.ReservationStatus;
 import com.ethanluong.ticketreservation.domain.type.SeatStatus;
 import com.ethanluong.ticketreservation.saga.SagaOrchestrator;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,6 +28,7 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ReservationServiceImpl implements ReservationService {
 
     private final SeatRepository seatRepository;
@@ -57,14 +60,23 @@ public class ReservationServiceImpl implements ReservationService {
             return tx.execute(status -> {
                 var seat = seatRepository.findById(seatId).orElseThrow();
 
-                if (seat.getStatus() == SeatStatus.HELD) {
-                    reservationRepository
-                            .findAllByStatusAndSeat_Id(ReservationStatus.HELD, seatId)
-                            .forEach(r -> r.setStatus(ReservationStatus.EXPIRED));
-                } else if (seat.getStatus() != SeatStatus.AVAILABLE) {
-                    // SOLD seats
+                if (seat.getStatus() == SeatStatus.SOLD) {
                     throw new SeatNotAvailableException(seatId);
                 }
+
+                // I2: Postgres owns hold truth. Our tryHold succeeded, but a missing key
+                // is not proof the previous hold elapsed — keys also vanish on Redis
+                // restart/failover/eviction. An unexpired HELD row means that hold is
+                // still live: refuse to steal it (the catch below releases our key).
+                // I4: the sweep of genuinely-expired rows runs unconditionally, not only
+                // when seat=HELD, so an orphaned HELD row can't wedge an AVAILABLE seat.
+                OffsetDateTime now = OffsetDateTime.now(clock);
+                List<Reservation> heldRows =
+                        reservationRepository.findAllByStatusAndSeat_Id(ReservationStatus.HELD, seatId);
+                if (heldRows.stream().anyMatch(r -> !r.getExpiresAt().isBefore(now))) {
+                    throw new SeatNotAvailableException(seatId);
+                }
+                heldRows.forEach(r -> r.setStatus(ReservationStatus.EXPIRED));
 
                 seat.setStatus(SeatStatus.HELD);
                 seatRepository.saveAndFlush(seat);
@@ -74,7 +86,7 @@ public class ReservationServiceImpl implements ReservationService {
                         .user(userRepository.getReferenceById(userId))
                         .seat(seat)
                         .status(ReservationStatus.HELD)
-                        .expiresAt(OffsetDateTime.now().plusMinutes(reservationExpiryMinutes))
+                        .expiresAt(OffsetDateTime.now(clock).plusMinutes(reservationExpiryMinutes))
                         .build();
 
 
@@ -84,7 +96,12 @@ public class ReservationServiceImpl implements ReservationService {
             });
         } catch (RuntimeException e) {
             // @Transactional rolled back the DB, but Redis has no rollback.
-            holdStore.release(seatId);
+            if (!holdStore.release(seatId, reservationId)) {
+                // Should be impossible: we SET this key moments ago, inside the seat lock,
+                // with a 10-min TTL. A miss here means Redis lost/changed the key underneath us.
+                log.warn("reserve compensation: hold for seat {} not owned by reservation {} moments after creation",
+                        seatId, reservationId);
+            }
             throw e;
         }
     }
@@ -121,7 +138,11 @@ public class ReservationServiceImpl implements ReservationService {
             seatRepository.save(seat);
             return new CancelOutcome(reservationRepository.save(reservation), reservationStatus);
         });
-        if(outcome.reservationStatus == ReservationStatus.HELD) {holdStore.release(outcome.cancelled.getSeat().getId());}
+        if (outcome.reservationStatus == ReservationStatus.HELD
+                && !holdStore.release(outcome.cancelled.getSeat().getId(), reservationId)) {
+            // Expected race: the hold TTL-expired between loading the reservation and releasing.
+            log.info("cancel: hold for reservation {} already expired before release", reservationId);
+        }
 
         return outcome.cancelled;
     }
@@ -135,29 +156,63 @@ public class ReservationServiceImpl implements ReservationService {
         List<Reservation> reservations = tx.execute(status ->
                 reservationRepository.findAllByUser_IdOrderByCreatedAtDesc(userId));
 
-        // Lazy reconciliation: a HELD row whose Redis TTL hold has expired is
-        // stale. Flip to EXPIRED on read, free its seat. Self-healing without
-        // a sweeper process.
-        List<Reservation> stale = reservations.stream()
+        // Lazy reconciliation: flip genuinely-expired HELD rows on read and free
+        // their seats — self-healing without a sweeper process.
+        // I2: Postgres owns hold truth. A missing Redis key alone is NOT expiry
+        // (keys vanish on restart/failover/eviction); only rows past their durable
+        // expires_at are candidates. Key-present short-circuits rows that are
+        // demonstrably still held.
+        OffsetDateTime now = OffsetDateTime.now(clock);
+        List<Reservation> candidates = reservations.stream()
                 .filter(r -> r.getStatus() == ReservationStatus.HELD)
+                .filter(r -> r.getExpiresAt().isBefore(now))
                 .filter(r -> !holdStore.hasHold(r.getSeat().getId()))
                 .toList();
 
-        if (!stale.isEmpty()) {
-            tx.executeWithoutResult(status -> {
-                for (Reservation r : stale) {
-                    var managed = reservationRepository.findById(r.getId()).orElseThrow();
-                    var seat = managed.getSeat();
-                    managed.setStatus(ReservationStatus.EXPIRED);
-                    if (seat.getStatus() == SeatStatus.HELD) {
-                        seat.setStatus(SeatStatus.AVAILABLE);
-                    }
-                }
-            });
-            // Reflect the flip in the returned list so callers see consistent state.
-            stale.forEach(r -> r.setStatus(ReservationStatus.EXPIRED));
+        for (Reservation r : candidates) {
+            if (expireStaleReservation(r.getId(), r.getSeat().getId())) {
+                // Reflect the flip in the returned list so callers see consistent state.
+                r.setStatus(ReservationStatus.EXPIRED);
+            }
         }
 
         return reservations;
+    }
+
+    /**
+     * C2: double-checked expiry. The staleness decision above was computed from an
+     * UNLOCKED snapshot, so every check is repeated inside the seat lock + tx before
+     * anything mutates — check-then-act is only safe when the check lives inside the
+     * mutual-exclusion + transaction boundary (same pattern as doReserve).
+     *
+     * @return true if the row was actually flipped to EXPIRED
+     */
+    private boolean expireStaleReservation(UUID reservationId, UUID seatId) {
+        try {
+            return Boolean.TRUE.equals(holdStore.withSeatLock(seatId, () -> tx.execute(status -> {
+                var managed = reservationRepository.findById(reservationId).orElse(null);
+                if (managed == null
+                        || managed.getStatus() != ReservationStatus.HELD
+                        || !managed.getExpiresAt().isBefore(OffsetDateTime.now(clock))
+                        || holdStore.hasHold(seatId)) {
+                    return false; // state moved between snapshot and lock — not stale after all
+                }
+                managed.setStatus(ReservationStatus.EXPIRED);
+
+                // No competing-hold query needed: idx_reservations_active_seat (partial
+                // unique on HELD rows) makes a second live hold unrepresentable, and a
+                // competitor's reserve runs under this same seat lock and would have
+                // expired this row first — the status re-check above already caught that.
+                var seat = managed.getSeat();
+                if (seat.getStatus() == SeatStatus.HELD) {
+                    seat.setStatus(SeatStatus.AVAILABLE);
+                }
+                return true;
+            })));
+        } catch (SeatContentionException e) {
+            // Reconciliation is opportunistic — a contended seat heals on the next read.
+            log.debug("reconciliation skipped for seat {} — lock contended", seatId);
+            return false;
+        }
     }
 }
