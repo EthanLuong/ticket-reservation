@@ -13,6 +13,7 @@ import com.ethanluong.ticketreservation.domain.repository.SeatRepository;
 import com.ethanluong.ticketreservation.domain.repository.UserRepository;
 import com.ethanluong.ticketreservation.domain.type.ReservationStatus;
 import com.ethanluong.ticketreservation.domain.type.SeatStatus;
+import com.ethanluong.ticketreservation.service.ReservationHoldStore;
 import com.ethanluong.ticketreservation.service.ReservationService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,6 +25,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -52,6 +54,7 @@ class RedisTTLHoldIT {
     @Autowired private OutboxEntryRepository outboxEntryRepository;
     @Autowired private PasswordEncoder passwordEncoder;
     @Autowired private StringRedisTemplate redis;
+    @Autowired private ReservationHoldStore reservationHoldStore;
 
     private UUID userId;
     private UUID otherUserId;
@@ -152,11 +155,27 @@ class RedisTTLHoldIT {
     }
 
     @Test
-    @DisplayName("reserve() reconciles stale HELD row when Redis TTL has expired")
+    @DisplayName("release() wrong owner fails to release hold")
+    void release_wrongOwner() {
+        UUID reserveId = UUID.randomUUID();
+        reservationHoldStore.tryHold(seatId, reserveId, Duration.ofSeconds(10));
+
+        assertThat(reservationHoldStore.release(seatId, UUID.randomUUID())).isFalse();
+        assertThat(redis.opsForValue().get(holdKey(seatId))).isEqualTo(reserveId.toString());
+
+        assertThat(reservationHoldStore.release(seatId, reserveId)).isTrue();
+        assertThat(redis.hasKey(holdKey(seatId))).isFalse();
+    }
+
+
+    @Test
+    @DisplayName("reserve() reconciles stale HELD row when the hold has genuinely expired")
     void reserve_reconcilesStaleHeldRowOnExpiredTtl() {
-        // Simulate an expired hold: DB still says HELD but the Redis TTL has lapsed.
+        // Genuine expiry = key gone AND expires_at in the past (I2: the DB is the
+        // authority; a missing key alone is not expiry).
         Reservation stale = reservationService.reserve(userId, seatId);
-        redis.delete(holdKey(seatId)); // simulate TTL expiry
+        redis.delete(holdKey(seatId));
+        backdateExpiry(stale.getId());
 
         // Another user tries to reserve — without reconciliation this would 409
         // (seat.status=HELD in Postgres). With reconciliation, the stale row is
@@ -172,10 +191,11 @@ class RedisTTLHoldIT {
     }
 
     @Test
-    @DisplayName("myReservations() lazy-reconciles HELD rows whose Redis TTL has expired")
+    @DisplayName("myReservations() lazy-reconciles HELD rows whose hold has genuinely expired")
     void myReservations_lazilyReconcilesExpiredHolds() {
         Reservation r = reservationService.reserve(userId, seatId);
-        redis.delete(holdKey(seatId)); // simulate TTL expiry
+        redis.delete(holdKey(seatId));
+        backdateExpiry(r.getId());
 
         var list = reservationService.myReservations(userId);
 
@@ -185,5 +205,69 @@ class RedisTTLHoldIT {
         // Seat is freed so a new reservation can take it.
         var seat = seatRepository.findById(seatId).orElseThrow();
         assertThat(seat.getStatus()).isEqualTo(SeatStatus.AVAILABLE);
+    }
+
+    // ---------------------------------------------------------- I2 / C2 (m0 audit)
+
+    @Test
+    @DisplayName("I2: key loss alone does not expire a live hold on read — Postgres expires_at is the authority")
+    void keyLossAlone_doesNotExpireHoldOnRead() {
+        Reservation r = reservationService.reserve(userId, seatId);
+        redis.delete(holdKey(seatId)); // Redis restart/failover/eviction — hold is still live by DB
+
+        var list = reservationService.myReservations(userId);
+
+        assertThat(list.get(0).getStatus()).isEqualTo(ReservationStatus.HELD);
+        assertThat(reservationRepository.findById(r.getId()).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.HELD);
+        assertThat(seatRepository.findById(seatId).orElseThrow().getStatus())
+                .isEqualTo(SeatStatus.HELD);
+    }
+
+    @Test
+    @DisplayName("I2: a competitor's reserve() cannot steal a live hold whose key was lost")
+    void keyLossAlone_reserveRefusesToStealLiveHold() {
+        Reservation victim = reservationService.reserve(userId, seatId);
+        redis.delete(holdKey(seatId)); // key lost, but expires_at is still 10 min out
+
+        assertThatThrownBy(() -> reservationService.reserve(otherUserId, seatId))
+                .isInstanceOf(SeatNotAvailableException.class);
+
+        // Victim untouched; the failed attempt compensated its own key and left no ghost row.
+        assertThat(reservationRepository.findById(victim.getId()).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.HELD);
+        assertThat(reservationRepository.count()).isEqualTo(1);
+        assertThat(redis.hasKey(holdKey(seatId))).isFalse();
+    }
+
+    @Test
+    @DisplayName("C5 backstop: the partial unique index makes a second live hold unrepresentable")
+    void partialIndex_rejectsSecondActiveHoldRow() {
+        // C2's nightmare state (two HELD rows, one seat) cannot exist in this schema:
+        // idx_reservations_active_seat is the last line of defense under every race
+        // above it, and the reconciliation code leans on that (no competing-hold query).
+        seedHeldReservation(userId, OffsetDateTime.now().plusMinutes(9));
+
+        assertThatThrownBy(() -> seedHeldReservation(otherUserId, OffsetDateTime.now().plusMinutes(9)))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+    }
+
+    // -------------------------------------------------------------- helpers
+
+    /** Ages a reservation past its durable expiry — the DB-side half of "the hold elapsed". */
+    private void backdateExpiry(UUID reservationId) {
+        var managed = reservationRepository.findById(reservationId).orElseThrow();
+        managed.setExpiresAt(OffsetDateTime.now().minusMinutes(1));
+        reservationRepository.save(managed);
+    }
+
+    private Reservation seedHeldReservation(UUID ownerId, OffsetDateTime expiresAt) {
+        return reservationRepository.save(Reservation.builder()
+                .id(UUID.randomUUID())
+                .user(userRepository.getReferenceById(ownerId))
+                .seat(seatRepository.getReferenceById(seatId))
+                .status(ReservationStatus.HELD)
+                .expiresAt(expiresAt)
+                .build());
     }
 }
