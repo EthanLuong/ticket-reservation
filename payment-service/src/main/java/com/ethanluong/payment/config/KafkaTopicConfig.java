@@ -1,4 +1,4 @@
-package com.ethanluong.ticketreservation.config;
+package com.ethanluong.payment.config;
 
 import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.context.annotation.Bean;
@@ -7,27 +7,28 @@ import org.springframework.kafka.config.TopicBuilder;
 
 /**
  * Topic ownership rule (R2): each service declares the topic it CONSUMES plus
- * that topic's DLT (which its own error handler writes). reservation-service
- * reads {@code payment.evt}, so it owns these two; payment-service declares
- * the {@code payment.cmd} pair. Partition count lives with the consumer
- * because it is the consumer's parallelism ceiling.
+ * that topic's DLT (which its own error handler writes). payment-service reads
+ * {@code payment.cmd}, so it owns these two; reservation-service reads
+ * {@code payment.evt} and keeps declaring that pair. Partition count lives with
+ * the consumer because it is the consumer's parallelism ceiling. Creation is
+ * idempotent, so a redeclare elsewhere would be harmless — just sloppy.
  */
 @Configuration
 public class KafkaTopicConfig {
 
     @Bean
-    public NewTopic paymentEvtTopic() {
+    public NewTopic paymentCmdTopic() {
         return TopicBuilder
-                .name("payment.evt")
+                .name("payment.cmd")
                 .partitions(3)
                 .replicas(1)
                 .build();
     }
 
     @Bean
-    public NewTopic paymentEvtDltTopic() {
+    public NewTopic paymentCmdDltTopic() {
         return TopicBuilder
-                .name("payment.evt.DLT")
+                .name("payment.cmd.DLT")
                 .partitions(3)
                 .replicas(1)
                 .build();
