@@ -1,8 +1,10 @@
 package com.ethanluong.ticketreservation.saga;
 
+import com.ethanluong.ticketreservation.logging.Correlation;
 import com.ethanluong.ticketreservation.saga.events.EventEnvelope;
 import com.ethanluong.ticketreservation.saga.events.KafkaTopics;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.MDC;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
@@ -17,10 +19,13 @@ public class PaymentEventListener {
 
     @KafkaListener(topics = KafkaTopics.PAYMENT_EVT)
     public void onPaymentEvent(String event, Acknowledgment ack) {
-
         EventEnvelope eventEnvelope = objectMapper.readValue(event, EventEnvelope.class);
-        sagaOrchestrator.handlePaymentEvent(eventEnvelope);
-        ack.acknowledge();
+
+        try(MDC.MDCCloseable mdc = Correlation.saga(eventEnvelope.sagaId())){
+            sagaOrchestrator.handlePaymentEvent(eventEnvelope);
+            ack.acknowledge();
+        }
+
 
 
     }

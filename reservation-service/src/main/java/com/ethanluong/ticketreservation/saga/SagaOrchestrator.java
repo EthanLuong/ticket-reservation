@@ -10,12 +10,14 @@ import com.ethanluong.ticketreservation.domain.repository.ReservationRepository;
 import com.ethanluong.ticketreservation.domain.repository.SagaRepository;
 import com.ethanluong.ticketreservation.domain.type.ReservationStatus;
 import com.ethanluong.ticketreservation.domain.type.SagaState;
+import com.ethanluong.ticketreservation.logging.Correlation;
 import com.ethanluong.ticketreservation.saga.events.CancelChargeIfStarted;
 import com.ethanluong.ticketreservation.saga.events.ChargeCard;
 import com.ethanluong.ticketreservation.saga.events.EventEnvelope;
 import com.ethanluong.ticketreservation.saga.events.EventTypes;
 import com.ethanluong.ticketreservation.saga.events.KafkaTopics;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -55,30 +57,34 @@ public class SagaOrchestrator {
     public void start(UUID reservationId, long amountCents){
         UUID sagaId = UUID.randomUUID();
 
-        Saga saga = new Saga();
-        saga.setId(sagaId);
-        saga.setType("BOOKING");
-        saga.setReservationId(reservationId);
-        saga.setState(SagaState.AWAITING_PAYMENT);
+        try(MDC.MDCCloseable mdc = Correlation.saga(sagaId)){
+            Saga saga = new Saga();
+            saga.setId(sagaId);
+            saga.setType("BOOKING");
+            saga.setReservationId(reservationId);
+            saga.setState(SagaState.AWAITING_PAYMENT);
 
-        // ADR 0003: the outbox row stores the serialized ENVELOPE, not the bare payload —
-        // the eventType discriminator must ride inside the JSON so the (pre-serialized)
-        // outbox publisher never needs to know the type.
-        EventEnvelope envelope = new EventEnvelope(
-                UUID.randomUUID(),
-                EventTypes.CHARGE_CARD,
-                1, OffsetDateTime.now(clock),
-                sagaId,
-                objectMapper.valueToTree(new ChargeCard(amountCents)));
+            // ADR 0003: the outbox row stores the serialized ENVELOPE, not the bare payload —
+            // the eventType discriminator must ride inside the JSON so the (pre-serialized)
+            // outbox publisher never needs to know the type.
+            EventEnvelope envelope = new EventEnvelope(
+                    UUID.randomUUID(),
+                    EventTypes.CHARGE_CARD,
+                    1, OffsetDateTime.now(clock),
+                    sagaId,
+                    objectMapper.valueToTree(new ChargeCard(amountCents)));
 
-        OutboxEntry outboxEntry = new OutboxEntry();
-        outboxEntry.setAggregateType("Saga");
-        outboxEntry.setAggregateId(sagaId);
-        outboxEntry.setPayload(objectMapper.writeValueAsString(envelope));
-        outboxEntry.setTopic(KafkaTopics.PAYMENT_CMD);
+            OutboxEntry outboxEntry = new OutboxEntry();
+            outboxEntry.setAggregateType("Saga");
+            outboxEntry.setAggregateId(sagaId);
+            outboxEntry.setPayload(objectMapper.writeValueAsString(envelope));
+            outboxEntry.setTopic(KafkaTopics.PAYMENT_CMD);
 
-        sagaRepository.save(saga);
-        outboxEntryRepository.save(outboxEntry);
+            sagaRepository.save(saga);
+            outboxEntryRepository.save(outboxEntry);
+            log.info("saga started: ChargeCard queued for reservation [{}] ({} cents)", reservationId, amountCents);
+        }
+
     }
 
     @Transactional(propagation = REQUIRED)
@@ -106,6 +112,7 @@ public class SagaOrchestrator {
                 if (notInState(currentSaga, SagaState.AWAITING_PAYMENT, envelope)) return;
                 currentSaga.setState(SagaState.COMPLETED);
                 reservation.setStatus(ReservationStatus.CONFIRMED);
+                log.info("saga COMPLETED: reservation [{}] CONFIRMED", currentSaga.getReservationId());
             }
             case EventTypes.PAYMENT_FAILED -> {
                 if (notInState(currentSaga, SagaState.AWAITING_PAYMENT, envelope)) return;
@@ -117,12 +124,14 @@ public class SagaOrchestrator {
                 // TODO: release Redis hold + free seat here after m0-audit-fixes merges
                 //  (needs owner-aware release(seatId, reservationId)). Until then the 10-min
                 //  hold TTL + lazy reconciliation free the seat — slow but safe.
+                log.info("saga CANCELLED: payment failed, reservation [{}] CANCELLED", currentSaga.getReservationId());
             }
             case EventTypes.REFUND_CONFIRMED -> {
                 if (notInState(currentSaga, SagaState.COMPENSATING, envelope)) return;
                 // Reservation was already CANCELLED when compensation started (timeout path);
                 // the refund confirmation just closes the saga.
                 currentSaga.setState(SagaState.CANCELLED);
+                log.info("saga CANCELLED: compensation settled (RefundConfirmed)");
             }
             default -> log.warn("payment event {}: unknown eventType {} — skipped", envelope.eventId(), envelope.eventType());
         }
@@ -145,6 +154,7 @@ public class SagaOrchestrator {
 
         currentSaga.setState(SagaState.COMPENSATING);
         reservationRepository.getReferenceById(currentSaga.getReservationId()).setStatus(ReservationStatus.CANCELLED);
+        log.info("saga timeout: COMPENSATING, reservation [{}] CANCELLED, CancelChargeIfStarted queued", currentSaga.getReservationId());
 
         EventEnvelope envelope = new EventEnvelope(
                 UUID.randomUUID(),
