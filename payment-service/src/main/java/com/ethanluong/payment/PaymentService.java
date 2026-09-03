@@ -75,8 +75,10 @@ public class PaymentService {
                 .build());
 
         if (result.approved()) {
+            log.info("charge authorized: {} cents, gateway ref [{}]", cmd.amountCents(), result.gatewayRef());
             emitPaymentEvent(EventTypes.PAYMENT_CONFIRMED, envelope.sagaId(), new PaymentConfirmed());
         } else {
+            log.info("charge declined: {} cents — {}", cmd.amountCents(), result.declineReason());
             emitPaymentEvent(EventTypes.PAYMENT_FAILED, envelope.sagaId(), new PaymentFailed());
         }
     }
@@ -87,6 +89,7 @@ public class PaymentService {
        Payment cancelledPayment = paymentRepository.findBySagaId(envelope.sagaId()).orElse(null);
        if (cancelledPayment != null && cancelledPayment.getStatus() == PaymentStatus.AUTHORIZED) {
            cancelledPayment.setStatus(PaymentStatus.REFUNDED);
+           log.info("payment [{}] REFUNDED on compensation", cancelledPayment.getId());
        }
 
        // Always emit — the saga parks in COMPENSATING and RefundConfirmed is the only

@@ -1,0 +1,15 @@
+{
+  "index_patterns": [
+    "applogs-*"
+  ],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "number_of_replicas": 0,
+      "number_of_shards": 1
+    }
+  },
+  "_meta": {
+    "description": "ticket-reservation local ELK: single node, replicas can never assign (ADR 0010). Installed by Logstash (manage_template) so a cold start reproduces it."
+  }
+}

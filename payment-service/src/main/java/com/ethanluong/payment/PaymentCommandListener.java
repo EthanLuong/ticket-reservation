@@ -2,7 +2,9 @@ package com.ethanluong.payment;
 
 import com.ethanluong.payment.events.EventEnvelope;
 import com.ethanluong.payment.events.KafkaTopics;
+import com.ethanluong.payment.logging.Correlation;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.MDC;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Component;
@@ -24,8 +26,10 @@ public class PaymentCommandListener {
 
         EventEnvelope eventEnvelope;
         eventEnvelope = objectMapper.readValue(event, EventEnvelope.class);
+        try(MDC.MDCCloseable mdc = Correlation.saga(eventEnvelope.sagaId())){
+            paymentService.handleCommand(eventEnvelope);
+            ack.acknowledge();
+        }
 
-        paymentService.handleCommand(eventEnvelope);
-        ack.acknowledge();
     }
 }

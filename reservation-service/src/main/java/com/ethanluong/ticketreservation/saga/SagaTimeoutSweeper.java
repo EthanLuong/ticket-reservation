@@ -2,8 +2,10 @@ package com.ethanluong.ticketreservation.saga;
 
 import com.ethanluong.ticketreservation.domain.repository.SagaRepository;
 import com.ethanluong.ticketreservation.domain.type.SagaState;
+import com.ethanluong.ticketreservation.logging.Correlation;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -30,7 +32,7 @@ public class SagaTimeoutSweeper {
         List<UUID> sagaIds = sagaRepository.findIdsByStateAndCreatedAtBefore(
                 SagaState.AWAITING_PAYMENT, OffsetDateTime.now(clock).minus(PAYMENT_TIMEOUT));
         for (UUID sagaId : sagaIds) {
-            try{
+            try (MDC.MDCCloseable mdc = Correlation.saga(sagaId)){
                 sagaOrchestrator.timeoutSaga(sagaId);
             } catch(Exception e){
                 log.error("timeout sweep failed: Saga [{}]", sagaId, e);
