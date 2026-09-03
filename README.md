@@ -1,80 +1,18 @@
 # Event Ticket Reservation System
 
-A Spring Boot event ticketing service handling concurrent seat reservations with cross-JVM coordination: Redis-native TTL holds, a Redisson distributed lock for hot-event contention, and a Postgres `@Version` + partial unique index backstop. Built as an interview portfolio piece.
+Two Spring Boot services that sell seats without ever double-selling: **reservation-service** owns seats, holds and the booking saga; **payment-service** owns charges. They share Kafka topics and an event contract, nothing else. One `sagaId` traces a booking across both — in Kibana locally, in CloudWatch in prod. Built as an interview portfolio piece.
 
-**Live demo:** [https://ticket-reservation-production-7193.up.railway.app](https://ticket-reservation-production-7193.up.railway.app)
-**Repo:** [github.com/EthanLuong/ticket-reservation](https://github.com/EthanLuong/ticket-reservation)
-
----
+**Live demo (AWS):** [https://d1bsa4m1s90vp2.cloudfront.net](https://d1bsa4m1s90vp2.cloudfront.net) · **Repo:** [github.com/EthanLuong/ticket-reservation](https://github.com/EthanLuong/ticket-reservation)
 
 ## Status
 
-**Phase 2a (payment saga over Kafka) — feature-complete on `phase-2a-payment-saga`.** Orchestrated booking saga (reserve → charge → confirm/compensate) via transactional outbox, idempotent consumers, DLT poison-pill handling, and an `Idempotency-Key` contract on the reserve endpoint. Design records: [ADR 0003](docs/adr/0003-event-typing.md) (wire format), [ADR 0007](docs/adr/0007-saga-messaging-outbox-orchestration-dlt.md) (outbox/orchestration/ordering/DLT), [ADR 0008](docs/adr/0008-deliberately-not-transactional.md) (deliberate non-transactionality).
-
-**Phase 1 (Redis holds + distributed lock) — SHIPPED.** Reservation TTL is now Redis-native (atomic `SET NX EX`), critical sections are wrapped in a Redisson `RLock` for cross-JVM serialization, and the `@Scheduled` Postgres sweeper has been retired in favor of two-path lazy reconciliation. Failure-closed (503) on Redis outage — see [`docs/adr/0002-redis-for-holds-and-locks.md`](docs/adr/0002-redis-for-holds-and-locks.md) for the design decisions.
-
-**Phase 0 (reservation foundation) — SHIPPED.** Single-service reservation system with JWT auth, optimistic-locked seat holds, and Testcontainers-proven race invariants. Deployed on Railway with managed Postgres.
-
-Phased roadmap (Phase 1–5) below.
-
----
-
-## Quick start
-
-### Option A — Docker Compose (prod-parity local)
-
-```bash
-docker compose up --build
-```
-
-Spins up Postgres 17-alpine + Redis 7-alpine + the service, gated on healthchecks for both. App listens on `http://localhost:8080`. Health probe:
-
-```bash
-curl http://localhost:8080/actuator/health
-# {"status":"UP"}    # 200 when Postgres + Redis are both up
-```
-
-If Redis is unreachable, reservation endpoints return 503 with a retryable `ProblemDetail`; reads (events, seats) continue to work since they don't touch Redis.
-
-### Option B — Maven dev loop (fastest)
-
-Requires Docker Desktop running (for the Testcontainers-backed dev Postgres).
-
-```bash
-./reservation-service/mvnw spring-boot:test-run    # dev run, auto-provisions Testcontainers Postgres
-./reservation-service/mvnw verify                  # full test suite + package
-```
-
-The `test-run` goal auto-wires a disposable Postgres container via `@ServiceConnection`, so no manual DB setup is needed.
+- **R3 — centralized logging, merged 2026-09-03.** JSON logs at the source, `sagaId` correlation through MDC, Filebeat → Logstash → Elasticsearch → Kibana behind `docker compose --profile elk` ([ADR 0010](docs/adr/0010-elk-structured-logging.md)).
+- **R2 — payment-service extracted, merged 2026-08-31.** Two deployables, two databases with credential isolation ([ADR 0009](docs/adr/0009-payment-db-one-container-two-databases.md)), two outboxes, wire format unchanged.
+- **AWS:** live on ECS Fargate ×2 behind ALB + CloudFront; the two-container redeploy and the GitHub Actions matrix build are R4, in progress ([roadmap](#roadmap)).
 
 ---
 
 ## Architecture
-
-One deployable today, two backing stores (Postgres = system of record, Redis = ephemeral coordination), Kafka carrying the payment saga between the reservation side and the payment component. The component boundary is already event-only — the [refocus design](docs/REFOCUS-DESIGN.md) splits it into a real second service.
-
-```mermaid
-flowchart LR
-    client([Browser SPA / curl])
-    subgraph app["Spring Boot app (one JAR)"]
-        sec[JWT filter chain] --> rest[REST controllers]
-        rest --> svc["services<br/>(TransactionTemplate)"]
-        svc --> repo[JPA repositories]
-        svc --> hold["ReservationHoldStore<br/>SET NX EX + Redisson RLock"]
-        svc --> saga[SagaOrchestrator<br/>+ 30s timeout sweeper]
-        saga --> obx[outbox relay]
-        paycmp["payment component<br/>MockPaymentGateway"]
-    end
-    client -->|HTTPS + Bearer JWT| sec
-    repo --> pg[("PostgreSQL 17<br/>Flyway · partial unique index<br/>@Version backstop")]
-    hold --> redis[("Redis 7<br/>hold:seat:* TTL · lock:seat:*<br/>coordination only")]
-    obx -->|payment.cmd| kafka[["Kafka (KRaft)<br/>3 partitions · key=sagaId"]]
-    kafka -->|payment.evt| saga
-    kafka --> paycmp
-    paycmp --> kafka
-```
-
-### Where this is going — refocus target ([design](docs/REFOCUS-DESIGN.md))
 
 ```mermaid
 flowchart LR
@@ -95,7 +33,17 @@ flowchart LR
     psvc -.-> elk
 ```
 
-Two services sharing nothing but Kafka topics and the event contract; each owns its database, dedup table, and outbox; one `sagaId` traces a booking across both in Kibana.
+Two services sharing nothing but Kafka topics and the event contract; each owns its database, dedup table and outbox; one `sagaId` traces a booking across both.
+
+![One saga, all services — Kibana Discover filtered by sagaId, both services interleaved in timestamp order](docs/img/kibana-saga-trace.png)
+
+*One `sagaId : "…"` query in Kibana: reserve → charge → confirm across both services, in order. The declined-card path reads the same way — five lines, all `INFO`, because a declined charge is a business outcome, not a fault.*
+
+### Service boundary — what is actually shared
+
+- **Shared:** the Kafka topics `payment.cmd` / `payment.evt` and the event-contract records that ride on them. The contracts are **duplicated** into each service on purpose rather than published as a shared JAR — additive-only schema rules govern changes ([REFOCUS-DESIGN §2](docs/REFOCUS-DESIGN.md), Decision D1).
+- **Not shared:** databases (`ticketreservation` vs `payments`, separate roles, `REVOKE CONNECT` verified), `processed_events` dedup tables, outbox tables and relays, Flyway histories, and code — neither module compiles against the other. Same Postgres container locally, RDS in prod; the isolation is ownership and credentials, not hardware ([ADR 0009](docs/adr/0009-payment-db-one-container-two-databases.md)).
+- **Consequence:** no cross-service joins or transactions. The saga (below) is the only cross-service consistency mechanism, and that was true before the split — the seam existed as package discipline first, which is what made the extraction a move/copy/duplicate rather than a rewrite.
 
 ### Domain
 
@@ -106,7 +54,7 @@ Event  1───N  Seat  1───N  Reservation  N───1  User
 
 Full schema: [`reservation-service/src/main/resources/db/migration/V1__init.sql`](reservation-service/src/main/resources/db/migration/V1__init.sql).
 
-### Reservation flow (Phase 1)
+### Reservation flow
 
 ```
 reserve(userId, seatId)
@@ -129,9 +77,9 @@ Cancellation mirrors the structure: lock → tx (set CANCELLED, free seat) → D
 
 `myReservations()` lazily reconciles HELD-with-no-Redis-key rows to EXPIRED on read — replaces the retired `@Scheduled` sweeper.
 
-### Saga flow (Phase 2a)
+### The booking saga
 
-Reserving now also starts a booking saga: the reservation transaction writes a `Saga` row and a `ChargeCard` command into the **transactional outbox** (same Postgres commit — no dual-write window); a relay publishes outbox rows to Kafka; the payment component charges and replies; the orchestrator drives the state machine to a terminal state.
+Reserving also starts a booking saga: the reservation transaction writes a `Saga` row and a `ChargeCard` command into the **transactional outbox** (same Postgres commit — no dual-write window); a relay publishes outbox rows to Kafka; payment-service charges and replies on `payment.evt`; the orchestrator drives the state machine to a terminal state.
 
 ```mermaid
 stateDiagram-v2
@@ -148,6 +96,51 @@ stateDiagram-v2
 Messages ride a generic envelope keyed by `sagaId` (per-saga total order — [ADR 0003](docs/adr/0003-event-typing.md)); delivery is **at-least-once + idempotent consumers** (dedup on `eventId`), never a claimed "exactly-once"; unprocessable records go to `<topic>.DLT` after 3 attempts ([ADR 0007](docs/adr/0007-saga-messaging-outbox-orchestration-dlt.md)).
 
 **Idempotency is layered — three nets, different failure modes:** the REST `Idempotency-Key` (required on `POST /api/reservations`) dedups client retries and replays the original response; each Kafka consumer's `processed_events` table dedups redelivered messages; the Redis seat hold blocks a second hold on the same seat. Any one alone leaves a gap the others close.
+
+---
+
+## Quick start
+
+Everything runs in Docker Compose. Copy `.env.example` to `.env` (or export the three secrets it lists) first.
+
+```bash
+docker compose up -d --build                 # core five: reservation-service, payment-service, Postgres, Redis, Kafka
+docker compose exec -T db psql -U postgres -d ticketreservation < scripts/dev-seed.sql   # 2 events, 36 seats (idempotent)
+bash scripts/e2e-smoke.sh                    # register → pick a seat → reserve → poll until CONFIRMED; prints PASS
+```
+
+With the logging stack:
+
+```bash
+docker compose --profile elk up -d --build   # adds Elasticsearch, Logstash, Kibana, Filebeat
+open http://localhost:15601                   # Kibana → Discover → data view applogs-* → saved search "one saga, all services"
+```
+
+Plain `docker compose up` never starts the ELK trio; `docker compose down` stops everything; `down -v` also drops the Postgres and Elasticsearch volumes.
+
+Health probes: `curl localhost:8080/actuator/health` (reservation-service); payment-service's actuator is network-internal, its healthcheck runs inside the container. If Redis is unreachable, reservation endpoints return `503` with a retryable `ProblemDetail`; reads keep working.
+
+<details><summary>Maven dev loop (fastest inner loop, one service at a time)</summary>
+
+Requires Docker Desktop running (Testcontainers-backed dev Postgres).
+
+```bash
+./reservation-service/mvnw spring-boot:test-run    # dev run, auto-provisions Testcontainers Postgres
+./reservation-service/mvnw verify                  # reservation-service suite + package
+./payment-service/mvnw verify                      # payment-service suite + package
+```
+
+The `test-run` goal auto-wires a disposable Postgres container via `@ServiceConnection`, so no manual DB setup is needed.
+
+</details>
+
+---
+
+## Observability
+
+Both services log one JSON object per line (`logstash-logback-encoder`), with `service` and every MDC entry as fields. `sagaId` is set-and-cleared at seven seams — the orchestrator, the timeout sweeper per saga, both outbox relays per row, and both Kafka listeners from the envelope — and `requestId` on HTTP threads via a servlet filter. MDC is a `ThreadLocal` on pooled threads, so every non-HTTP seam clears what it set; verified by running a second saga on the same threads and confirming the first saga's query didn't grow.
+
+Locally, `--profile elk` runs Filebeat (Docker autodiscover on the two app images) → Logstash (unwraps the JSON, drops noise) → Elasticsearch (one index per service per day, `applogs-<service>-<date>`) → Kibana. In prod the same JSON lines go to CloudWatch Logs via the `awslogs` driver, and `filter sagaId = "…"` in Logs Insights is the same query — no cluster to run. The decisions, and the traps hit on the way (Elasticsearch 9's built-in `logs-*-*` data-stream template among them), are in [ADR 0010](docs/adr/0010-elk-structured-logging.md).
 
 ---
 
@@ -193,13 +186,13 @@ All endpoints are JSON. Protected endpoints require `Authorization: Bearer <toke
 ### Example: full booking flow
 
 ```bash
-BASE=https://ticket-reservation-production-7193.up.railway.app
+BASE=http://localhost:8080          # or https://d1bsa4m1s90vp2.cloudfront.net
 
 # 1. Register
 TOKEN=$(curl -s -X POST $BASE/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"demo@example.com","password":"password12345","displayName":"Demo"}' \
-  | jq -r .token)
+  | jq -r .accessToken)
 
 # 2. Pick an event + seat
 EVENT_ID=$(curl -s $BASE/api/events | jq -r '.content[0].id')
@@ -214,13 +207,15 @@ curl -X POST $BASE/api/reservations \
   -d "{\"seatId\":\"$SEAT_ID\"}"
 ```
 
+`scripts/e2e-smoke.sh` is this flow as a script, polling `/api/reservations/me` until the saga lands on `CONFIRMED`. The seeded VIP-1 seat ($150) is the built-in sad path: the mock gateway declines anything over $100, and the saga compensates to `CANCELLED`.
+
 Error responses follow [RFC 7807](https://www.rfc-editor.org/rfc/rfc7807) (`application/problem+json`). Headline cases:
 
 | Status | `type` slug | When | Client action |
 |---|---|---|---|
 | `409` | `seat-not-available` | Seat is currently held by another user | Pick another seat |
 | `409` | `seat-contention` | Another reserve/cancel for this seat is in flight (Redisson lock contention) | **Auto-retry** — `retryable: true` flag set |
-| `409` | `optimistic-lock` | DB-level `@Version` race lost (rare under Phase 1's lock + TTL) | Refresh state, retry |
+| `409` | `optimistic-lock` | DB-level `@Version` race lost (rare under the lock + TTL) | Refresh state, retry |
 | `503` | `redis-unavailable` | Redis is unreachable — coordination layer is down | Retry after `retryAfterSeconds` (5s) |
 | `409` | *(no problem body)* | Same `Idempotency-Key` still in flight — the bare body is the discriminator vs the typed 409s above | Retry after `Retry-After` (2s) with the **same** key |
 | `422` | *(no problem body)* | `Idempotency-Key` reused with a different request body | Client bug — mint a fresh key |
@@ -254,7 +249,7 @@ Example for Redis outage:
 
 ## Design decisions
 
-Phase 2a's decisions are recorded as ADRs rather than repeated here: [0003 event typing](docs/adr/0003-event-typing.md) · [0007 outbox / orchestration / ordering / DLT](docs/adr/0007-saga-messaging-outbox-orchestration-dlt.md) · [0008 deliberately not transactional](docs/adr/0008-deliberately-not-transactional.md). The numbered items below are Phase 0/1.
+Recorded as ADRs where the decision had real alternatives: [0002 Redis for holds and locks](docs/adr/0002-redis-for-holds-and-locks.md) · [0003 event typing](docs/adr/0003-event-typing.md) · [0005 self-managed Kafka, not MSK](docs/adr/0005-kafka-self-managed-not-msk.md) · [0007 outbox / orchestration / ordering / DLT](docs/adr/0007-saga-messaging-outbox-orchestration-dlt.md) · [0008 deliberately not transactional](docs/adr/0008-deliberately-not-transactional.md) · [0009 one Postgres container, two databases](docs/adr/0009-payment-db-one-container-two-databases.md) · [0010 structured logging + ELK behind a profile](docs/adr/0010-elk-structured-logging.md). The numbered items below are the reservation-side decisions that predate the ADR habit, plus the two split-era ones in short form.
 
 ### 1. Three-layer concurrency defense (not one)
 
@@ -284,37 +279,35 @@ Two common ways to keep `updated_at` fresh on every update: DB trigger or JPA li
 
 - Simpler deploy — no trigger install/rollback to manage.
 - Works identically across Testcontainers-Postgres and production.
-- **Known tradeoff:** doesn't fire on JPQL bulk `UPDATE` statements. Acceptable for Phase 0 — no bulk updates in the code path. If bulk operations are added later (e.g., expiry sweep rewritten as one bulk UPDATE), this moves to a trigger.
+- **Known tradeoff:** doesn't fire on JPQL bulk `UPDATE` statements. Acceptable — no bulk updates in the code path. If bulk operations are added later (e.g., expiry sweep rewritten as one bulk UPDATE), this moves to a trigger.
 
 ### 4. JWT stateless auth, no server-side session
 
 `/api/auth/login` returns a JWT signed with HS256. The auth filter validates signature + expiry on each request and populates `SecurityContext`. No session store.
 
 - Works across horizontal scale without sticky sessions or a session DB.
-- Secret sourced from `APP_SECURITY_JWT_SECRET` env var, ≥32 bytes for HS256 key-length requirement.
-- Rotation is a Phase 4 concern.
+- Secret sourced from `APP_SECURITY_JWT_SECRET` env var, ≥32 bytes for HS256 key-length requirement; a startup guard refuses default secrets outside dev.
 
 ### 5. `ddl-auto=validate` + Flyway owns schema
 
-`spring.jpa.hibernate.ddl-auto=validate` means Hibernate does not mutate the schema — it only verifies that entities and tables match. Flyway V1 migration is the source of truth.
+`spring.jpa.hibernate.ddl-auto=validate` means Hibernate does not mutate the schema — it only verifies that entities and tables match. Flyway migrations are the source of truth, one history per service.
 
 - Catches entity/schema drift at startup — app fails to boot rather than silently emitting malformed SQL.
 - Makes schema changes auditable (one migration file per change, version-controlled).
 - Validated in CI: startup itself is the smoke test.
 
-### 6. Phase 1 — Redis for coordination, Postgres for system of record
+### 6. Redis for coordination, Postgres for system of record
 
-Full rationale in [`docs/adr/0002-redis-for-holds-and-locks.md`](docs/adr/0002-redis-for-holds-and-locks.md). Headline decisions:
+Full rationale in [ADR 0002](docs/adr/0002-redis-for-holds-and-locks.md). Headline decisions:
 
 - **Two-layer Redis**: `SET NX EX` for the TTL hold (atomic, 10 min business duration) and Redisson `RLock` for the critical-section lock (2 s lease, prevents wasted work on hot events). Both are needed — the SET NX gives correctness, the RLock gives efficiency.
 - **Drop the `@Scheduled` sweeper**: Redis-native TTL replaces it. Stale rows are reconciled on-the-fly inside `reserve()` (under the RLock) and lazily inside `myReservations()` (on user read). Self-healing without a polling thread.
 - **Per-seat lock granularity**: `lock:seat:{id}`, not per-event. Two reservations for two different seats in the same event don't serialize.
 - **Fail-closed on Redis outage** (503 SERVICE_UNAVAILABLE): a fall-back-to-DB-only path would lose cross-JVM serialization and permit double-holds. Better to refuse service. Verified by `RedisOutageIT`.
-- **Single-node Redis** (Upstash managed) for Phase 1; Redlock multi-node hardening deferred to Phase 4+ if real load measurements justify it.
 
 ### 7. `Persistable<UUID>` + drop `@GeneratedValue` for pre-assigned reservation ids
 
-Phase 1's "Redis-first ordering" needs the reservation id **before** the DB insert (so the id can be the Redis value at `SET NX EX` time). Pre-assigning a UUID to a Hibernate entity with `@GeneratedValue(strategy = UUID)` triggered both Spring Data's "is this new?" heuristic AND Hibernate's transient-vs-detached classifier — two independent layers that needed to agree. The fix:
+"Redis-first ordering" needs the reservation id **before** the DB insert (so the id can be the Redis value at `SET NX EX` time). Pre-assigning a UUID to a Hibernate entity with `@GeneratedValue(strategy = UUID)` triggered both Spring Data's "is this new?" heuristic AND Hibernate's transient-vs-detached classifier — two independent layers that needed to agree. The fix:
 
 ```java
 @Id
@@ -325,6 +318,14 @@ private UUID id;          // no @GeneratedValue
 ```
 
 Drops `@GeneratedValue` (so Hibernate doesn't classify pre-set ids as detached) and implements `Persistable` (so Spring Data routes to `persist()`, not `merge()`). Four rounds of failure (StaleObjectStateException → PersistentObjectException → still PersistentObjectException with Persistable alone → finally INSERT works once `@GeneratedValue` is dropped) before the right combination clicked — interview-grade JPA gotcha story.
+
+### 8. Database-per-service as ownership, not hardware ([ADR 0009](docs/adr/0009-payment-db-one-container-two-databases.md))
+
+One Postgres container, two databases, two roles, `REVOKE CONNECT` on the other's database. Cross-service SQL fails at connection time, not as a grant accident; a second container would have added weight without adding logical isolation, and prod is RDS either way.
+
+### 9. Structured logs at the source; ELK local, CloudWatch prod ([ADR 0010](docs/adr/0010-elk-structured-logging.md))
+
+Correlation is free when the app writes JSON with MDC fields and expensive everywhere else. Logstash earns its slot with the two-layer JSON unwrap, a `service` fallback for non-JSON startup lines, and a drop stage. Classic daily indices under an `applogs-` prefix — not `logs-`, which Elasticsearch 9's built-in template silently turns into data streams that reject Logstash's writes.
 
 ---
 
@@ -341,7 +342,7 @@ Drops `@GeneratedValue` (so Hibernate doesn't classify pre-set ids as detached) 
 
 Categorized outcomes distinguish app-layer losses (`FAILURE_NOT_AVAILABLE`) from DB-layer losses (`FAILURE_OPTIMISTIC_LOCK`, `FAILURE_DATA_INTEGRITY`), proving which layer caught each racing thread. Ran 50× clean — invariant is stable, not flaky.
 
-### Phase 1 Redis tests
+### Redis tests
 
 | Test class | What it verifies |
 |---|---|
@@ -349,29 +350,36 @@ Categorized outcomes distinguish app-layer losses (`FAILURE_NOT_AVAILABLE`) from
 | [`RedissonLockContentionIT`](reservation-service/src/test/java/com/ethanluong/ticketreservation/RedissonLockContentionIT.java) | `reserve()` fast-fails with `SeatContentionException` (<500ms) when the `RLock` is held on a different thread; succeeds normally once released |
 | [`RedisOutageIT`](reservation-service/src/test/java/com/ethanluong/ticketreservation/RedisOutageIT.java) | `@MockitoBean RedissonClient` injects connection failure; asserts exception bubbles to handler, zero DB drift, 503 ProblemDetail mapping |
 
+### Saga and cross-service tests
+
+Kafka-backed suites in both modules run against live Testcontainers brokers with Awaitility: crash-replay republishing from the outbox, duplicate-event dedup, out-of-order rejection, DLT routing after 3 attempts, and — since the split — `PaymentEvtConsumptionIT` on the reservation side and `PaymentRoundTripIT` on the payment side, proving each service's wire guarantees independently. `scripts/e2e-smoke.sh` is the cross-service proof on the real compose stack.
+
 ### Stack
 
 - JUnit 5 + AssertJ
-- Testcontainers with `@ServiceConnection` for both Postgres 17-alpine and Redis 7-alpine
+- Testcontainers with `@ServiceConnection` for Postgres 17-alpine, Redis 7-alpine and Kafka
 - `@MockitoBean` (Spring Framework 6.2+) for failure injection
 - No H2, no mocks for DB-backed behavior — Testcontainers because H2's partial index and `gen_random_uuid()` don't match Postgres semantics
 
-Run the full suite (17 tests across 6 classes):
+Run both suites:
 
 ```bash
 ./reservation-service/mvnw verify
+./payment-service/mvnw verify
 ```
 
 ---
 
 ## Tech stack
 
-- **Runtime:** Java 21, Spring Boot 4.0.x
-- **Data:** PostgreSQL 17-alpine, Flyway migrations, Spring Data JPA (Hibernate)
+- **Runtime:** Java 21, Spring Boot 4.0.x — two modules, two Dockerfiles, independent `mvnw`
+- **Messaging:** Apache Kafka (KRaft), Spring Kafka; transactional outbox in each service
+- **Data:** PostgreSQL 17-alpine, Flyway migrations per service, Spring Data JPA (Hibernate)
 - **Coordination:** Redis 7-alpine, Spring Data Redis (Lettuce) for TTL holds, Redisson 3.50.0 for distributed locks
 - **Security:** Spring Security 6, jjwt 0.12.x
-- **Testing:** JUnit 5, AssertJ, Testcontainers, `@MockitoBean` for failure injection
-- **Packaging:** Multi-stage Dockerfile (Java 21 JDK builder → JRE-alpine runtime)
+- **Logging:** logstash-logback-encoder (JSON + MDC); Elastic 9.5 stack locally behind a compose profile; CloudWatch Logs in prod
+- **Testing:** JUnit 5, AssertJ, Testcontainers, Awaitility, `@MockitoBean` for failure injection
+- **Packaging:** Multi-stage Dockerfiles (Java 21 JDK builder → JRE-alpine runtime)
 - **Deploy:** AWS — ECS Fargate behind ALB, RDS Postgres, ElastiCache Redis, self-managed Kafka (KRaft) on EC2, CloudFront two-origin (see `docs/aws/DEPLOY-HANDBOOK.md`)
 - **Build:** Maven (via `mvnw`)
 
@@ -386,9 +394,10 @@ Run the full suite (17 tests across 6 classes):
 | **2a. Payment saga over Kafka** | Transactional outbox → topics → idempotent consumers → DLT; orchestrated state machine + timeout compensation; REST `Idempotency-Key` | ✅ Shipped (merged 2026-08-21) |
 | **Frontend** | React 19 SPA: auth, events, seat grid with live hold countdown + saga status | ✅ Shipped |
 | **AWS deploy** | VPC, ECS Fargate ×2, RDS, ElastiCache, KRaft on EC2, SSM secrets, CloudFront | ✅ Live |
-| **R1–R2. Microservice split** | Own the container stack; extract `payment-service` (own DB, own outbox) — [refocus design](docs/REFOCUS-DESIGN.md) | ▶ Active |
-| **R3. ELK logging** | JSON logs + `sagaId` correlation → Filebeat → Logstash → Elasticsearch → Kibana | Planned |
-| **R4. Surface** | Target-architecture README, AWS redeploy of the two-service shape, CI/CD | Planned |
+| **R1. Own the container stack** | Multi-stage Dockerfile, healthcheck-gated compose, secrets in `.env`, module layout — [refocus design](docs/REFOCUS-DESIGN.md) | ✅ Merged `841a997` |
+| **R2. Microservice split** | `payment-service` extracted: own DB, own outbox, duplicated contracts, `e2e-smoke.sh` | ✅ Merged `899d626` (2026-08-31) |
+| **R3. ELK logging** | JSON logs + `sagaId` correlation → Filebeat → Logstash → Elasticsearch → Kibana, `--profile elk` | ✅ Merged `6d249a3` (2026-09-03) |
+| **R4. Surface** | Two-container task definition, GitHub Actions matrix build over OIDC to two ECR repos, CloudWatch saga trace | ▶ Active |
 | **Parked** | Rate limiting, circuit breaker, caching, tickets/QR, refunds, group bookings, load tests | Backlog |
 
 Each phase ships polished — deployed, tested, documented. At any checkpoint there is an interview-ready artifact.
@@ -397,18 +406,18 @@ Each phase ships polished — deployed, tested, documented. At any checkpoint th
 
 ## Env vars
 
-Required at runtime:
+Required at runtime (compose supplies all of them from `.env`):
 
-| Variable | Purpose |
-|---|---|
-| `SPRING_DATASOURCE_URL` | JDBC URL — must start with `jdbc:postgresql://` |
-| `SPRING_DATASOURCE_USERNAME` | DB user |
-| `SPRING_DATASOURCE_PASSWORD` | DB password |
-| `SPRING_DATA_REDIS_URL` | Redis connection — `redis://host:port` for plaintext, `rediss://host:port` for TLS (prod ElastiCache with transit encryption). Defaults to `redis://localhost:6379` for local dev. |
-| `APP_SECURITY_JWT_SECRET` | HS256 signing key, ≥32 bytes |
-| `SERVER_PORT` | On Railway/Fly, bind to `${PORT}` |
+| Variable | Service | Purpose |
+|---|---|---|
+| `SPRING_DATASOURCE_URL` | both | JDBC URL — `…/ticketreservation` for reservation-service, `…/payments` for payment-service |
+| `SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD` | reservation | Reservation DB role |
+| `PAYMENT_DB_PASSWORD` | payment | `payment_user`'s password (the role is created by `scripts/initdb/01-payments.sh` on first Postgres init) |
+| `SPRING_DATA_REDIS_URL` | reservation | `redis://host:port` for plaintext, `rediss://` for TLS (prod ElastiCache with transit encryption) |
+| `SPRING_KAFKA_BOOTSTRAP_SERVERS` | both | `broker:29092` in compose, the EC2 broker in prod |
+| `APP_SECURITY_JWT_SECRET` | reservation | HS256 signing key, ≥32 bytes |
 
-Local dev via `docker compose up` supplies all of these with sane defaults. A dev JWT secret is baked into `application.properties` — **never use it in production**.
+A dev JWT secret is baked into `application.properties` — **never use it in production**; the startup guard enforces that outside the `dev` profile.
 
 ## Frontend
 
@@ -416,13 +425,7 @@ A React 19 + TypeScript + Tailwind v4 SPA lives in `frontend/` — login/registe
 
 ### Running it locally
 
-1. **Backend + Postgres + Redis** (Docker Compose):
-
-   ```bash
-   docker compose up -d
-   ```
-
-   If you change backend code (e.g. `SecurityConfig` CORS), rebuild the app image with `docker compose up -d --build app`.
+1. **Backend stack** (Docker Compose): `docker compose up -d`. If you change backend code (e.g. `SecurityConfig` CORS), rebuild with `docker compose up -d --build app`.
 
 2. **Seed data** — there is no event-creation endpoint (`EventController` is read-only), so a fresh database has nothing to browse. Load the dev seed (2 events, 36 seats total) with:
 
@@ -431,8 +434,6 @@ A React 19 + TypeScript + Tailwind v4 SPA lives in `frontend/` — login/registe
    ```
 
    Safe to re-run — every row uses a fixed UUID + `ON CONFLICT (id) DO NOTHING`.
-
-   *(Alternative to step 1+2: `./reservation-service/mvnw spring-boot:run` against a Postgres/Redis you already have running, then apply the seed the same way.)*
 
 3. **Frontend dev server:**
 
@@ -462,3 +463,14 @@ Shows off the concurrency guarantees from a real browser, not just curl:
 ![Second buyer racing the same seat — contention toast](docs/img/contention-toast.png)
 ![My reservations — live saga status chips and hold countdowns](docs/img/account-reservations.png)
 
+---
+
+<details><summary>History — how it got here (Phase 0 → 2a, before the split)</summary>
+
+**Phase 2a (payment saga over Kafka) — merged 2026-08-21.** Orchestrated booking saga (reserve → charge → confirm/compensate) via transactional outbox, idempotent consumers, DLT poison-pill handling, and an `Idempotency-Key` contract on the reserve endpoint, all inside one deployable with the payment component already event-only behind Kafka — the package discipline that later made R2 a move rather than a rewrite. Design records: [ADR 0003](docs/adr/0003-event-typing.md), [ADR 0007](docs/adr/0007-saga-messaging-outbox-orchestration-dlt.md), [ADR 0008](docs/adr/0008-deliberately-not-transactional.md).
+
+**Phase 1 (Redis holds + distributed lock).** Reservation TTL became Redis-native (atomic `SET NX EX`), critical sections wrapped in a Redisson `RLock` for cross-JVM serialization, and the `@Scheduled` Postgres sweeper retired in favor of two-path lazy reconciliation. Failure-closed (503) on Redis outage — [ADR 0002](docs/adr/0002-redis-for-holds-and-locks.md).
+
+**Phase 0 (reservation foundation).** Single-service reservation system with JWT auth, optimistic-locked seat holds, and Testcontainers-proven race invariants. First deployed on Railway with managed Postgres; moved to the AWS footprint above in July 2026.
+
+</details>
