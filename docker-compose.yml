@@ -127,6 +127,32 @@ services:
       elasticsearch:
         condition: service_healthy
 
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:9.5.2
+    profiles: [ "elk" ]
+    restart: unless-stopped
+    environment:
+      LS_JAVA_OPTS: -Xms256m -Xmx256m
+    volumes:
+      - ./elk/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:9.5.2
+    profiles: [ "elk" ]
+    restart: unless-stopped
+    user: root
+    command: [ "--strict.perms=false" ]
+    volumes:
+      - ./elk/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - logstash
+
 volumes:
   pgdata:
   esdata:

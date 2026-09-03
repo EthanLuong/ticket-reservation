@@ -1,0 +1,22 @@
+# DRAFT (R3 Task 4) — annotate every line before committing (Block-4 deal).
+# The image condition matches both app images and deliberately NOT the ELK
+# containers themselves — reason through why that matters before keeping it.
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: false
+      templates:
+        - condition:
+            contains:
+              docker.container.image: ticket-reservation
+          config:
+            - type: filestream
+              id: container-${data.docker.container.id}
+              parsers:
+                - container: ~
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*.log
+
+output.logstash:
+  hosts: ["logstash:5044"]
