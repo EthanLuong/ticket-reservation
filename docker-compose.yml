@@ -31,6 +31,9 @@ services:
 
   app:
     build: ./reservation-service
+    logging: &applog
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }   # Docker never rotates by default; Filebeat's registry copes with rotation
     ports:
       - "8080:8080"
     environment:
@@ -53,6 +56,7 @@ services:
   # network-internal, the healthcheck runs inside the container).
   payment:
     build: ./payment-service
+    logging: *applog
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/payments
       PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?err}
@@ -136,6 +140,7 @@ services:
       LS_JAVA_OPTS: -Xms256m -Xmx256m
     volumes:
       - ./elk/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - ./elk/applogs-template.json:/usr/share/logstash/config/applogs-template.json:ro   # NOT under pipeline/: Logstash parses every file there as a pipeline
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -145,7 +150,9 @@ services:
     profiles: [ "elk" ]
     restart: unless-stopped
     user: root
-    command: [ "--strict.perms=false" ]
+    # -e = log to stderr so `docker compose logs filebeat` works (the image CMD we replace set it);
+    # --strict.perms=false = a bind-mounted Windows file can't satisfy the config-ownership check.
+    command: [ "-e", "--strict.perms=false" ]
     volumes:
       - ./elk/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
