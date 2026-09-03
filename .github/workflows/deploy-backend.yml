@@ -1,0 +1,98 @@
+# Backend CI/CD — two services, one workflow (R4 Task 2).
+#
+# Auth is GitHub OIDC: no stored AWS keys. The github-deploy role's trust policy pins this repo
+# and the main branch; aws-actions/configure-aws-credentials exchanges the job's identity token
+# for minutes-long credentials. Policy for the role: docs/aws/artifacts/github-deploy-policy.json.
+#
+# Activation order (docs/aws/DEPLOY-HANDBOOK.md Phase 9 + docs/aws/artifacts/README.md):
+#   1. ECR repos reservation-service + payment-service exist; OIDC provider + github-deploy role exist.
+#   2. Run this once from the Actions tab (workflow_dispatch) and watch it go green.
+#   3. Then uncomment the push trigger below.
+#
+# Shape: test (both modules) -> build (matrix: one job per service, one image per ECR repo,
+# tagged with the git SHA) -> deploy (register a task-definition revision with BOTH images
+# swapped by container name, roll the service, wait for stable).
+
+name: deploy-backend
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  #   paths: ['reservation-service/**', 'payment-service/**', 'docker-compose.yml', '.github/workflows/deploy-backend.yml']
+
+permissions:
+  id-token: write   # OIDC token — this is the whole point
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  ROLE_ARN: arn:aws:iam::119004747116:role/github-deploy
+  ECS_CLUSTER: ticket-reservation
+  ECS_SERVICE: ticket-reservation-app
+  TASK_FAMILY: ticket-reservation-app
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [reservation-service, payment-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - name: Test ${{ matrix.service }} (Testcontainers — the runner has Docker)
+        run: ./mvnw --no-transfer-progress verify
+        working-directory: ${{ matrix.service }}
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [reservation-service, payment-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2   # inside each matrix leg — jobs are separate VMs
+      - name: Build and push ${{ matrix.service }}
+        run: |
+          IMAGE=${{ steps.ecr.outputs.registry }}/${{ matrix.service }}:${{ github.sha }}
+          docker build -t "$IMAGE" ./${{ matrix.service }}
+          docker push "$IMAGE"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Register a task-definition revision with both images
+        run: |
+          REG=${{ steps.ecr.outputs.registry }}
+          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" \
+            --query taskDefinition > taskdef.json
+          # strip read-only fields; swap images BY CONTAINER NAME, never by array index
+          jq --arg app "$REG/reservation-service:${{ github.sha }}" \
+             --arg pay "$REG/payment-service:${{ github.sha }}" '
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .compatibilities, .registeredAt, .registeredBy)
+            | (.containerDefinitions[] | select(.name == "app").image)     = $app
+            | (.containerDefinitions[] | select(.name == "payment").image) = $pay' \
+            taskdef.json > taskdef-new.json
+          aws ecs register-task-definition --cli-input-json file://taskdef-new.json \
+            --query 'taskDefinition.revision' --output text
+      - name: Roll the service and wait for stable
+        run: |
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$TASK_FAMILY" >/dev/null
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
