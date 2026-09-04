@@ -4,10 +4,15 @@
 # and the main branch; aws-actions/configure-aws-credentials exchanges the job's identity token
 # for minutes-long credentials. Policy for the role: docs/aws/artifacts/github-deploy-policy.json.
 #
-# Activation order (docs/aws/DEPLOY-HANDBOOK.md Phase 9 + docs/aws/artifacts/README.md):
-#   1. ECR repos reservation-service + payment-service exist; OIDC provider + github-deploy role exist.
-#   2. Run this once from the Actions tab (workflow_dispatch) and watch it go green.
-#   3. Then uncomment the push trigger below.
+# Activation (done 2026-09-03; docs/aws/DEPLOY-HANDBOOK.md Phase 9 + docs/aws/artifacts/README.md):
+#   ECR repos reservation-service + payment-service, OIDC provider, github-deploy role — all live.
+#   Two green workflow_dispatch runs; the two-container task definition (revision 7) was
+#   registered by hand once, after which the deploy job swaps both images.
+#
+# Triggers: every push to main under the paths filter runs test + build, so both images are
+# proven and land in ECR tagged with the SHA. deploy runs ONLY on workflow_dispatch — the AWS
+# footprint is torn down between demos (teardown.sh), so an unconditional deploy would fail on
+# every push while the ECS service doesn't exist. Redeploy = handbook Phases 4+6, then press Run.
 #
 # Shape: test (both modules) -> build (matrix: one job per service, one image per ECR repo,
 # tagged with the git SHA) -> deploy (register a task-definition revision with BOTH images
@@ -17,9 +22,9 @@ name: deploy-backend
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches: [main]
-  #   paths: ['reservation-service/**', 'payment-service/**', 'docker-compose.yml', '.github/workflows/deploy-backend.yml']
+  push:
+    branches: [main]
+    paths: ['reservation-service/**', 'payment-service/**', 'docker-compose.yml', '.github/workflows/deploy-backend.yml']
 
 permissions:
   id-token: write   # OIDC token — this is the whole point
@@ -68,6 +73,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
