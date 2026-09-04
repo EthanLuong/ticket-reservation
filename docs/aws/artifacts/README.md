@@ -16,12 +16,13 @@ teardown → redeploy is a checklist, not archaeology.
 ## R4 activation order (Tasks 2–3 of the guide)
 
 1. **ECR:** create `payment-service`; either rename `ticket-reservation` → `reservation-service` or create `reservation-service` and let the old repo age out. Lifecycle policy (keep last 10) on both.
-2. **SSM:** `aws ssm put-parameter --name /ticketres/prod/payment-db-password --type SecureString --value '<random>'`. Add `ssm:GetParameters` on that ARN to the execution role's policy — the container can't start without it.
-3. **RDS:** run `scripts/initdb/rds-payments.sql` from inside the VPC (header of the file has the command).
+2. **SSM:** `MSYS_NO_PATHCONV=1 aws ssm put-parameter --name /ticketres/prod/payment-db-password --type SecureString --value "$(openssl rand -hex 24)"` (the prefix stops Git Bash mangling the leading slash). No IAM change: the execution role's `ticketres-read-params` policy already grants `ssm:GetParameters` on `parameter/ticketres/prod/*`.
+3. **RDS:** run `scripts/initdb/rds-payments.sql` from the Kafka EC2 box via Session Manager (header of the file has the command and the two caveats: no psql on the box, and the db SG needed a rule from the kafka SG — added 2026-09-03).
 4. **OIDC:** IAM → Identity providers → `token.actions.githubusercontent.com`, audience `sts.amazonaws.com`; role `github-deploy` with web-identity trust pinned to `repo:EthanLuong/ticket-reservation:ref:refs/heads/main`; attach `github-deploy-policy.json`.
-5. **First run:** Actions → deploy-backend → Run workflow. Watch: 2 test legs → 2 build legs → deploy registers revision 6 and rolls the service. `aws ecs describe-services … --query 'services[0].deployments'` shows the rollover.
-6. **Smoke:** `SMOKE_BASE_URL=https://d1bsa4m1s90vp2.cloudfront.net bash scripts/e2e-smoke.sh`.
-7. Uncomment the `push` trigger; commit.
+5. **First run:** Actions → deploy-backend → Run workflow. Watch: 2 test legs → 2 build legs → deploy. Against the single-container revision 5 the deploy's name-based `jq` edit is a no-op for `payment`, so the first run produces a **one-container revision 6** on the new reservation image (done 2026-09-03). The two-container shape has to be registered by hand once from `task-def-app.json` (Task 3); every run after that swaps both images.
+6. **Two-container revision:** fill the two `REPLACED_BY_WORKFLOW` tags with a SHA that exists in both repos, `aws ecs register-task-definition --cli-input-json file://…`, then `aws ecs update-service --cluster ticket-reservation --service ticket-reservation-app --task-definition ticket-reservation-app` and wait for stable.
+7. **Smoke:** `SMOKE_BASE_URL=https://d1bsa4m1s90vp2.cloudfront.net bash scripts/e2e-smoke.sh`.
+8. Uncomment the `push` trigger; commit.
 
 ## Known-stale bits from July, fixed here
 
