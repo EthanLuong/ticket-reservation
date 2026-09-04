@@ -245,6 +245,8 @@ Come back to this after Phase 6's verify. Then:
    - `<RDS_ENDPOINT>` · `<ELASTICACHE_ENDPOINT>` (host only, the URL already has `:6379`) · `<KAFKA_EC2_PRIVATE_IP>`
 6. Search → **ECS** → Task definitions → **Create new task definition with JSON** → replace the sample with your filled JSON → Create. It should save as **ticket-reservation-app : 1**.
 
+> **R4 delta (2026-09-03) — two containers, `artifacts/task-def-app.json` is the current shape.** One task, two containers, both `essential`: `app` (reservation-service, :8080, the ALB target, 1280 MB) and `payment` (payment-service, :8081 internal, 768 MB), task memory 2048 ([ADR 0011](../adr/0011-two-containers-one-task-definition.md)). The images end in `REPLACED_BY_WORKFLOW` because the GitHub Actions deploy job swaps them by container name; to register by hand, `sed` that placeholder to a tag that exists in **both** ECR repos (`reservation-service`, `payment-service`) and `aws ecs register-task-definition --cli-input-json file://…` (`MSYS_NO_PATHCONV=1` in Git Bash, Windows-style path). Payment's extras: `SPRING_DATASOURCE_URL` → `…/payments`, secret `PAYMENT_DB_PASSWORD` ← SSM `/ticketres/prod/payment-db-password` (the execution role's `ticketres-read-params` wildcard already covers it), same Kafka bootstrap as `app`, log stream prefix `payment`. Before the first two-container boot, `payments` + `payment_user` must exist on RDS: `scripts/initdb/rds-payments.sql` from the Kafka box (header has the command and the PG16 `GRANT payment_user TO postgres` reason). Live since revision 7.
+
 ### 6.4 Target group, then ALB
 7. Search → **Target groups** (EC2 section) → **Create target group**: Target type **IP addresses** · Name **ticket-app-tg** · Protocol **HTTP**, Port **8080** · VPC **ticketres-vpc** · Health check path **/actuator/health** → expand Advanced health check settings → Healthy threshold **2** → Next → register NO targets (ECS does that) → Create.
 8. Search → **Load balancers** → **Create load balancer** → **Application Load Balancer**: Name **ticket-alb** · Internet-facing · IPv4 · Network mapping: **ticketres-vpc** + tick **both** subnets · Security groups: remove default, select **ticketres-alb-sg** · Listener HTTP **80** → forward to **ticket-app-tg** → Create.
@@ -304,11 +306,17 @@ Come back to this after Phase 6's verify. Then:
 ## Phase 9 — CI/CD: GitHub OIDC + Actions (~1.5 h)
 
 ### 9.1 Trust GitHub
-1. IAM → **Identity providers** → **Add provider** → **OpenID Connect** · Provider URL **https://token.actions.githubusercontent.com** → click Get thumbprint · Audience **sts.amazonaws.com** → Add.
+1. IAM → **Identity providers** → **Add provider** → **OpenID Connect** · Provider URL **https://token.actions.githubusercontent.com** → click Get thumbprint · Audience **sts.amazonaws.com** → Add. **No trailing slash on the URL** — with one, the provider ARN ends in `…githubusercontent.com/` and every condition key becomes `token.actions.githubusercontent.com/:sub`; the trust policy below then fails validation ("must evaluate … :sub or :job_workflow_ref"). Delete and recreate if it happened; the role survives.
 
 ### 9.2 The deploy role
-2. IAM → Roles → Create role → **Web identity** → provider: the one from step 1 · Audience sts.amazonaws.com · GitHub organization: **EthanLuong** · repository: **ticket-reservation** · branch: **main** → Next.
-3. Skip attaching managed policies → name **github-deploy** → Create. Open it → add this inline policy (name **ticketres-deploy**), `<ACCOUNT_ID>`/`<BUCKET>`/`<DIST_ID>` filled:
+2. IAM → Roles → Create role → **Web identity** → provider: the one from step 1 · Audience sts.amazonaws.com. The wizard may or may not show GitHub organization / repository / branch fields (it did on the second attempt, not the first). Either way, after creation open the role → **Trust relationships** → **Edit** and make sure the condition has BOTH keys — without the `sub` pin any GitHub repo in the world can assume the role:
+```json
+"Condition": { "StringEquals": {
+  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+  "token.actions.githubusercontent.com:sub": "repo:EthanLuong/ticket-reservation:ref:refs/heads/main" } }
+```
+   (`sub` pins repo AND branch in one string; `aud` is the audience. A `workflow_dispatch` from any other branch gets AccessDenied at assume-role — intended.)
+3. The current wizard won't let you skip permissions: pick **Create inline policy** on that page, paste **`artifacts/github-deploy-policy.json`** (the R4 version — ECR `Resource` is the two repo ARNs `reservation-service` + `payment-service`, backend-only, no S3/CloudFront because `deploy-frontend.yml` isn't activated), name **github-deploy**. The block below is the July single-repo/frontend version, kept for the S3 + CloudFront statements you'd append if the frontend workflow is ever turned on (`<BUCKET>` = `ticketres-web-el7291`, `<DIST_ID>` = `E339ADN24H3R1R`):
 ```json
 {
   "Version": "2012-10-17",
@@ -331,11 +339,11 @@ Come back to this after Phase 6's verify. Then:
 ```
 
 ### 9.3 Activate the workflows
-4. Copy `docs/aws/artifacts/deploy-backend.yml` and `deploy-frontend.yml` into `.github/workflows/`.
-5. Fill the `env:` placeholders: role ARN (from step 3), cluster/service names, bucket, distribution id.
-6. Commit to main, push, watch the Actions tab: test → build → ECR push → new task-def revision → `ecs update-service` → rolling replacement behind the ALB with zero downtime (watch the target group during it — old tasks drain as new ones go healthy).
+4. `.github/workflows/deploy-backend.yml` is already in place (R4): matrix `test` + matrix `build` over `[reservation-service, payment-service]`, one `deploy` that swaps both images by container name. `deploy-frontend.yml` still sits in `artifacts/`, not activated.
+5. `env:` is filled (role ARN, cluster, service, family, region). Trigger is `workflow_dispatch` until the first green run; then uncomment `push:` with the `paths:` filter.
+6. Actions → deploy-backend → Run workflow: 2 test legs → 2 build legs → deploy → rolling replacement behind the ALB (old tasks drain as new ones go healthy). **First-run traps hit 2026-09-03:** `mvnw` committed `100644` from Windows → exit 126 (`git update-index --chmod=+x`); a test that only passed because compose Redis was on localhost:6379 (`RedissonConfig` now reads `DataRedisConnectionDetails`). Against a one-container task-def the deploy's name-based `jq` edit silently skips `payment` — register the two-container shape by hand once (6.3 delta), after that every run swaps both.
 
-**Verify:** push a trivial README change → both workflows green → ECS service shows a new task definition revision running.
+**Verify:** run green → `aws ecs describe-services … --query 'services[0].deployments'` shows the new revision PRIMARY/COMPLETED → smoke the saga steps through CloudFront (`scripts/e2e-smoke.sh`'s `/actuator/health` gate can't pass there — CloudFront only routes `/api/*` to the ALB).
 **Concept:** OIDC = GitHub proves "I am a workflow on main of EthanLuong/ticket-reservation" with a short-lived signed token; AWS trades it for temporary credentials scoped to that role. No stored keys anywhere — nothing to leak, nothing to rotate. This replaces the access-keys-in-repo-secrets pattern that gets people breached, and it's a resume line.
 
 ---
@@ -372,4 +380,4 @@ Phases 0–3 cost $0. The $20 budget fires early *by design* — teardown betwee
 | 4 | 7 + 8 | **live HTTPS URL**, dashboard + alarms |
 | 5 | 9 + 10 | pipeline, README, teardown drill |
 
-Stopping >a day? Run teardown (keeps: ECR, S3, CloudFront, params, IAM, VPC — redeploy is Phases 4+6, ~30 min).
+Stopping >a day? Run teardown (keeps: ECR, S3, CloudFront, params, IAM, VPC + SGs incl. the kafka→db 5432 rule — redeploy is Phases 4+6, ~30 min). Redeploy notes after R4: restore RDS from the final snapshot (it carries `payments` + `payment_user`, so `rds-payments.sql` need not re-run); the new Kafka EC2 gets a new private IP → both containers' `SPRING_KAFKA_BOOTSTRAP_SERVERS` in the task-def change, register a revision, then the workflow can take over.
