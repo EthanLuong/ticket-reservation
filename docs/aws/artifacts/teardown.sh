@@ -18,7 +18,7 @@ SERVICE=ticket-reservation-app
 ALB_NAME=ticket-alb
 TG_NAME=ticket-app-tg
 RDS_ID=ticket-reservation-db          # <-- match what you named it in Phase 4
-CACHE_ID=ticket-reservation-redis     # <-- match Phase 4
+CACHE_ID=ticket-reservation-redis     # <-- match Phase 4 (this is the REPLICATION GROUP id; the node is ticket-reservation-redis-001)
 KAFKA_TAG="Name=tag:Name,Values=kafka-broker"  # <-- tag the EC2 'Name=kafka-broker' at launch
 
 echo "== 1/5 ECS service -> 0 and delete"
@@ -40,8 +40,8 @@ echo "== 4/5 RDS (final snapshot — restore from it next session instead of re-
 aws rds delete-db-instance --region $REGION --db-instance-identifier $RDS_ID \
   --final-db-snapshot-identifier "$RDS_ID-$(date +%Y%m%d-%H%M)"
 
-echo "== 5/5 ElastiCache"
-aws elasticache delete-cache-cluster --region $REGION --cache-cluster-id $CACHE_ID
+echo "== 5/5 ElastiCache (Valkey was created as a replication group, not a standalone node — delete-cache-cluster returns CacheClusterNotFound)"
+aws elasticache delete-replication-group --region $REGION --replication-group-id $CACHE_ID --no-retain-primary-cluster
 
 echo "Done. Billing tail: RDS/ElastiCache take ~10 min to delete. Check the console"
 echo "Billing page tomorrow — the only recurring lines left should be pennies (S3/EBS snapshots)."

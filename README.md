@@ -2,13 +2,13 @@
 
 Two Spring Boot services that sell seats without ever double-selling: **reservation-service** owns seats, holds and the booking saga; **payment-service** owns charges. They share Kafka topics and an event contract, nothing else. One `sagaId` traces a booking across both — in Kibana locally, in CloudWatch in prod. Built as an interview portfolio piece.
 
-**Live demo (AWS):** [https://d1bsa4m1s90vp2.cloudfront.net](https://d1bsa4m1s90vp2.cloudfront.net) · **Repo:** [github.com/EthanLuong/ticket-reservation](https://github.com/EthanLuong/ticket-reservation)
+**AWS: deployable on demand** — the footprint (ECS Fargate, RDS, ElastiCache, Kafka on EC2, ALB) is torn down between demos and comes back in ~30 min from [`docs/aws/DEPLOY-HANDBOOK.md`](docs/aws/DEPLOY-HANDBOOK.md) Phases 4+6 plus one press of the deploy workflow; CloudFront front door stays at [d1bsa4m1s90vp2.cloudfront.net](https://d1bsa4m1s90vp2.cloudfront.net). Last live: 2026-09-03, task-definition revision 7, both saga paths verified through CloudFront. · **Repo:** [github.com/EthanLuong/ticket-reservation](https://github.com/EthanLuong/ticket-reservation)
 
 ## Status
 
 - **R3 — centralized logging, merged 2026-09-03.** JSON logs at the source, `sagaId` correlation through MDC, Filebeat → Logstash → Elasticsearch → Kibana behind `docker compose --profile elk` ([ADR 0010](docs/adr/0010-elk-structured-logging.md)).
 - **R2 — payment-service extracted, merged 2026-08-31.** Two deployables, two databases with credential isolation ([ADR 0009](docs/adr/0009-payment-db-one-container-two-databases.md)), two outboxes, wire format unchanged.
-- **AWS:** live on ECS Fargate ×2 behind ALB + CloudFront; the two-container redeploy and the GitHub Actions matrix build are R4, in progress ([roadmap](#roadmap)).
+- **R4 — surfaced, 2026-09-03.** Both services run as two containers in one ECS task ([ADR 0011](docs/adr/0011-two-containers-one-task-definition.md)); GitHub Actions builds both images in a matrix over OIDC (no stored keys) into two ECR repos on every push, deploy on demand; one `sagaId` traced across both containers in CloudWatch Logs Insights. Footprint torn down between demos ([roadmap](#roadmap)).
 
 ---
 
@@ -331,6 +331,10 @@ One Postgres container, two databases, two roles, `REVOKE CONNECT` on the other'
 
 Correlation is free when the app writes JSON with MDC fields and expensive everywhere else. Logstash earns its slot with the two-layer JSON unwrap, a `service` fallback for non-JSON startup lines, and a drop stage. Classic daily indices under an `applogs-` prefix — not `logs-`, which Elasticsearch 9's built-in template silently turns into data streams that reject Logstash's writes.
 
+### 10. Two containers, one ECS task definition ([ADR 0011](docs/adr/0011-two-containers-one-task-definition.md))
+
+payment-service rides in the same Fargate task as reservation-service (`app` + `payment`, both `essential`) rather than as a second ECS service. Under `awsvpc` the two share a network namespace, so no service discovery is needed and the ALB still fronts only `app`; the second service is a decision deferred until payment needs its own scaling or deploy cadence. The pipeline swaps both images by container name, never by array index. Running two task replicas exposed at-least-once behavior compose never showed: each outbox row is published once per replica, and the consumer-side dedup tables are what hold the saga to one charge — the seam a `FOR UPDATE SKIP LOCKED` claim on the outbox poll would close.
+
 ---
 
 ## Testing
@@ -397,11 +401,11 @@ Run both suites:
 | **1. Redis holds + distributed lock** | Redis-native TTL holds, Redisson `RLock` per seat, lazy reconciliation, fail-closed (503) on Redis outage | ✅ Shipped |
 | **2a. Payment saga over Kafka** | Transactional outbox → topics → idempotent consumers → DLT; orchestrated state machine + timeout compensation; REST `Idempotency-Key` | ✅ Shipped (merged 2026-08-21) |
 | **Frontend** | React 19 SPA: auth, events, seat grid with live hold countdown + saga status | ✅ Shipped |
-| **AWS deploy** | VPC, ECS Fargate ×2, RDS, ElastiCache, KRaft on EC2, SSM secrets, CloudFront | ✅ Live |
+| **AWS deploy** | VPC, ECS Fargate ×2, RDS, ElastiCache, KRaft on EC2, SSM secrets, CloudFront | ✅ Deployable on demand (torn down between demos) |
 | **R1. Own the container stack** | Multi-stage Dockerfile, healthcheck-gated compose, secrets in `.env`, module layout — [refocus design](docs/REFOCUS-DESIGN.md) | ✅ Merged `841a997` |
 | **R2. Microservice split** | `payment-service` extracted: own DB, own outbox, duplicated contracts, `e2e-smoke.sh` | ✅ Merged `899d626` (2026-08-31) |
 | **R3. ELK logging** | JSON logs + `sagaId` correlation → Filebeat → Logstash → Elasticsearch → Kibana, `--profile elk` | ✅ Merged `6d249a3` (2026-09-03) |
-| **R4. Surface** | Two-container task definition, GitHub Actions matrix build over OIDC to two ECR repos, CloudWatch saga trace | ▶ Active |
+| **R4. Surface** | Two-container task definition, GitHub Actions matrix build over OIDC to two ECR repos, CloudWatch saga trace | ✅ Done `8e81164` (2026-09-03) |
 | **Parked** | Rate limiting, circuit breaker, caching, tickets/QR, refunds, group bookings, load tests | Backlog |
 
 Each phase ships polished — deployed, tested, documented. At any checkpoint there is an interview-ready artifact.
