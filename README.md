@@ -39,6 +39,10 @@ Two services sharing nothing but Kafka topics and the event contract; each owns 
 
 *One `sagaId : "…"` query in Kibana: reserve → charge → confirm across both services, in order. The declined-card path reads the same way — five lines, all `INFO`, because a declined charge is a business outcome, not a fault.*
 
+![The same saga in prod — CloudWatch Logs Insights on the ECS log group, filtered by sagaId, both containers' streams interleaved](docs/img/cloudwatch-saga-trace.png)
+
+*Same JSON, same query, no cluster: in prod the two containers write to one CloudWatch log group via the `awslogs` driver, and `filter sagaId = "…"` in Logs Insights is the Kibana query with different spelling. ELK locally to own the parse; CloudWatch in prod because the platform already collects structured logs. Running two tasks also surfaced what one compose replica never could: each outbox row is published once per replica, and the consumer-side dedup tables are what keep that at exactly one charge and one CONFIRMED.*
+
 ### Service boundary — what is actually shared
 
 - **Shared:** the Kafka topics `payment.cmd` / `payment.evt` and the event-contract records that ride on them. The contracts are **duplicated** into each service on purpose rather than published as a shared JAR — additive-only schema rules govern changes ([REFOCUS-DESIGN §2](docs/REFOCUS-DESIGN.md), Decision D1).
